@@ -310,6 +310,45 @@ implement identically for immediate transfers — into unused RAM (codeD's own
 leading pad words) instead of trying to write `INBUFH`/`INBUFL`, then
 repoints the four read hooks there. See `tools/gui.py` to try either one.
 
+### Synthesising a sample
+
+Reading the GameCube pad is only half the problem: the four injection hooks
+all live inside `KPADiRead`, and `KPADiRead` gives up before any of them run
+when the channel has no Wii Remote data queued. The check is at
+`0x80247BE0` — `lbz r0,0x10f(r31)` on the channel's sample count, then a
+branch straight to the function's exit if it's zero. No Wii Remote, no
+samples, no hooks, nothing to inject into. That, not the extension checks,
+is why a Wii Remote had to be connected even though every input was coming
+from the GameCube port.
+
+`codeE` hooks that exact instruction, so it runs with the channel's KPAD
+base already in `r31` and the channel index in `r27`, and fabricates a
+sample when there is none. The ring it writes into is the same one the
+game's own WPAD callback fills at `0x802485C8`: 16 entries of `0x38` bytes
+at KPAD `+0x110`, next-write index at `+0x10E`, count at `+0x10F`, with the
+index wrapped at read time rather than on increment.
+
+The sample is zeroed, because `codeA`–`codeD` overwrite the buttons, motion
+vectors and stick from Serial Interface state further down anyway. Three
+bytes are not zeroed, because they decide whether the rest of KPAD will
+look at the sample at all:
+
+| Offset | Value | Checked at |
+| --- | --- | --- |
+| `+0x28` | `1` — extension valid | `0x802462C8` |
+| `+0x29` | `0` — no extension error | `0x802462BC` |
+| `+0x36` | `4` — device type | `0x802462D4` |
+
+`4` is the useful device type because it satisfies both halves of
+`read_kpad_acc`: the Wii Remote accelerometer block accepts `1`, `2`, `4`,
+`5`, `7` and `8`, while the Nunchuk block — where the left drum's motion
+vector is read — accepts only `4` and `5`.
+
+`codeE` does nothing at all unless the channel has a valid, error-free
+GameCube response on SI *and* the sample count is zero, so a connected Wii
+Remote always wins and nothing about the existing behaviour changes. Build
+with `--no-sample` to leave it out.
+
 ### Input decoding
 
 `INBUFH` for a valid GameCube response:
@@ -361,7 +400,8 @@ Found on hardware, in rough priority order:
   The poller now clears the error nibbles each frame — see "Hot-plugging".
   If replugging still fails after this, the next suspect is that the port
   also needs a `SIGetType`-style re-probe, not just an error acknowledgement.
-- **A Wii Remote + Nunchuk is still required.** The real blocker is upstream
+- **A Wii Remote + Nunchuk is still required** — *fix written, not yet run.*
+  The real blocker is upstream
   of the extension check: `KPADiRead` early-outs at `0x80247BE0` when the
   channel's queued-sample count at KPAD `+0x10F` is zero, which is exactly
   the case with no Wii Remote connected — so none of the four hooks ever run
@@ -369,17 +409,20 @@ Found on hardware, in rough priority order:
   bytes at KPAD `+0x110`, with the write index at `+0x10E` and the count at
   `+0x10F`, filled by the WPAD callback at `0x802485E0`.
 
-  So making a bare GameCube pad drive player *N* means **synthesising a KPAD
-  sample**: the poller hook at `0x80247ADC` runs before that early-out, so it
-  can write a zeroed sample into the ring and set the count to 1 whenever
-  SI reports a valid pad on the channel and no real sample arrived. The
-  hooks downstream already overwrite buttons, motion and stick from SI, so
-  the synthetic sample's contents barely matter — but its device-type byte
-  does (see the next item). Untried.
+  `codeE` (see "Synthesising a sample") now fabricates one, so a bare
+  GameCube pad should be able to drive player *N* on its own. **Written and
+  statically verified, but not yet run** — on hardware or in Dolphin.
 
-  The "No Nunchuk Required" opt-in code below is a blunter, narrower thing:
-  it only forces the seven `*(byte*)(x+0x5c) != 0` extension-present checks
-  to pass, which does not help if `KPADiRead` bailed before reaching them.
+  Note that this is deliberately inert whenever a real Wii Remote is
+  streaming: `codeE` only acts when the channel's sample count is zero, so
+  it changes nothing about how the hack behaves today with a Wii Remote and
+  Nunchuk connected. Playing with a real Nunchuk keeps working by
+  construction — which is the part the "No Nunchuk Required" opt-in below
+  gets wrong. That code is a blunter, narrower thing: it forces the seven
+  `*(byte*)(x+0x5c) != 0` extension-present checks to pass unconditionally,
+  which doesn't help if `KPADiRead` bailed before reaching them. It may
+  still be needed alongside `codeE` if those checks turn out to gate
+  something on the synthetic channel.
 - **The left drum is less responsive than the right.** Not a threshold
   problem — the two trigger paths really are symmetric in `codeA` (same
   `> 40` compare on both analog bytes, same digital masks). The asymmetry is
@@ -390,11 +433,21 @@ Found on hardware, in rough priority order:
   `0x802462EC` only if the sample's device-type byte at `+0x36` is **4 or 5**
   (checked at `0x802462D4`) — anything else branches straight to the
   function's exit at `0x80246588` and the left drum's motion is simply never
-  read. That byte is written from the WPAD probe result at `0x802485F8`, so
-  it is a Wii-side device type, not something the GameCube pad influences.
-  Forcing it to 4 when a GameCube pad is present should make both drums
-  equally responsive, and is the same lever the synthetic-sample work above
-  needs. Untried.
+  read. That byte is written from the WPAD probe result at `0x802485F8`
+  (the value the game's controller manager keeps at its WPAD context
+  `+0x8b8`), so it is a Wii-side device type, not something the GameCube pad
+  influences.
+
+  **That gate is probably not the cause, though**, and this is worth being
+  explicit about rather than leaving as a plausible-sounding theory: the left
+  drum is *weak*, not dead, and the game is played today with a real Nunchuk
+  connected — which almost certainly already reports 4 there, or the Nunchuk
+  block would never run at all. So the asymmetry is more likely in the
+  processing itself: the Wii Remote branch at `0x80246004`–`0x802460B0` and
+  the Nunchuk branch at `0x80246310`–`0x8024645C` are separate code doing
+  separate arithmetic, and they have not been compared instruction by
+  instruction yet. Confirming what a real Nunchuk reports at `+0x36` is a
+  one-line read in Dolphin and should come first.
 - **The post-race tips screen ("Press A to continue") doesn't accept input.**
   Finishing a Grand Prix stage lands on it and nothing gets past it. That
   screen presumably reads input through a path the KPAD button-compose hook

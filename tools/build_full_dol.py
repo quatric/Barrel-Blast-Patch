@@ -49,6 +49,8 @@ CODEA_HOOK = 0x80248090
 CODEB_HOOK = 0x80246588
 CODEC_HOOK = 0x8024791C
 CODED_HOOK = 0x80247500
+CODEE_HOOK = 0x80247BE0  # KPADiRead's `lbz r0,0x10f(r31)`, before the no-samples early-out
+CODEE_ASM = os.path.join(HERE, '..', 'src', 'codeE_sample.s')
 
 CODEA_PATCHES = [(26, 0x75208000, 0x71208000)]
 CODEC_PATCHES = [
@@ -137,6 +139,8 @@ def main():
     ap.add_argument('src')
     ap.add_argument('dst')
     ap.add_argument('--variant', choices=['autopoll', 'stash'], default='autopoll')
+    ap.add_argument('--no-sample', action='store_true',
+                    help='omit codeE (the synthetic KPAD sample for a bare GameCube pad)')
     args = ap.parse_args()
 
     d = Dol(args.src)
@@ -164,6 +168,20 @@ def main():
     coded_words = list(by_hook[CODED_HOOK])
     print(f'codeD: unchanged ({len(coded_words)} words)')
 
+    codee_words = None
+    if not args.no_sample:
+        orig = struct.unpack('>I', d.read(CODEE_HOOK, 4))[0]
+        assert orig == 0x881F010F, f'codeE hook site is {orig:#010x}, not lbz r0,0x10f(r31)'
+        codee_words = assemble(CODEE_ASM)
+        assert codee_words[-1] == orig, 'codeE must end with the hooked instruction'
+        # Pad before the hooked instruction, not after, so it stays immediately
+        # ahead of the branch-back slot the codehandler overwrites.
+        body = codee_words[:-1]
+        if len(body) % 2:
+            body.append(0x60000000)
+        codee_words = body + [orig, 0x60000000]
+        print(f'codeE: synthetic KPAD sample ({len(codee_words)} words, new code)')
+
     if args.variant == 'stash':
         raise SystemExit(
             'stash variant needs its codeA-D word offsets recomputed against the new '
@@ -182,6 +200,8 @@ def main():
     blob += emit(CODEB_HOOK, codeb_words)
     blob += emit(CODEC_HOOK, codec_words)
     blob += emit(CODED_HOOK, coded_words)
+    if codee_words is not None:
+        blob += emit(CODEE_HOOK, codee_words)
     blob += terminator
 
     old_list_len = sum(8 + len(w) * 4 for h, w in by_hook.items()) + len(terminator)
