@@ -9,19 +9,18 @@ by Wii Remote / Nunchuk shake detection, and the game has no GameCube input path
 at all. These codes hook the KPAD library, poll the Serial Interface directly, and
 synthesise the motion the game is looking for from GameCube button and stick state.
 
-> **⚠️ Work in progress — console behavior not yet hardware-confirmed.**
-> The four button/motion/stick hooks are known to work in Dolphin. An SI
-> auto-polling hook is now included (see "Reading the GameCube controller"
-> below) that's designed to make the same codes work on real hardware — its
-> hook-installation has been verified in a debugger against a running Dolphin
-> instance, but it has not yet been confirmed on real hardware or observed
-> actually firing mid-gameplay. Use `tools/gui.py` (see "Patcher tool" below)
-> to build a test image. Jump (the "pull up on both bongos" gesture) is still
-> driven by a placeholder acceleration vector rather than captured
-> real-controller values. Classic Controller support now covers buttons,
-> sticks and drumming, but **none of the Classic Controller path has been
-> run yet** — see "Known issues". Treat this as a work in progress, not a
-> finished hack.
+> **✅ Confirmed working on real hardware** (2026-08-09), after a long stretch
+> where these codes worked in Dolphin and did nothing at all on console. The
+> cause was the SI auto-polling gap described under "Reading the GameCube
+> controller" below; the `autopoll` poller fixes it. Build a disc image with
+> `tools/build_full_dol.py` (poller + Classic Controller baked into
+> `main.dol` together).
+>
+> **Still a work in progress** — see "Known issues" for what's broken. The
+> big ones: hot-plugging a GameCube controller stops it being recognised
+> until reboot, the game still insists on a Wii Remote + Nunchuk being
+> connected, the left drum is less responsive than the right, and the
+> post-race "Press A to continue" tips screen doesn't accept input.
 
 ## Classic Controller
 
@@ -298,28 +297,38 @@ locals. Skipping that corrupts the caller's frame and crashes.
 
 ## Known issues
 
-- **The Classic Controller path has never been run** — not on hardware, not
-  even in Dolphin. It is derived statically: every offset it uses is either
-  confirmed from the decompiled game (the `+0x7c`/`+0x80` trigger floats, the
-  `+0x5c` extension type, the `base+0x60` register convention in codeC) or
-  reused unchanged from the already-working GameCube path, and the patched
-  result was disassembled and its control flow checked instruction by
-  instruction. That is not the same as it working. Test before trusting it.
-- One Classic Controller behaviour is known to be wrong by construction: the
-  left drum writes the "nunchuk shake" magnitude at KPAD `+0x74`/`+0x78`,
-  which for a Classic Controller is where codeD reads the **right stick** for
-  the IR pointer. So the pointer will jerk for the ~4 frames of each left-drum
-  hit. Harmless during a race (the pointer is unused there) and you are not
-  drumming in menus, but it is real. Fixing it properly needs codeC to
-  snapshot the right stick before codeB clobbers it.
-- Whether the game's left-drum detection even reads `+0x74`/`+0x78` when the
-  extension is a Classic Controller rather than a Nunchuk is **not confirmed**.
-  The game officially supports neither, and its accelerometer reader
-  (`zz_80245f98_`) skips the nunchuk block unless the extension type is 1
-  (Nunchuk). If the drum detector gates the same way, the left drum will do
-  nothing on a Classic Controller and the fix is a different shape entirely —
-  making the Classic masquerade as a Nunchuk. This is the first thing to check
-  if drumming does not respond.
+Found on hardware, in rough priority order:
+
+- **Hot-plugging a GameCube controller breaks it.** Unplug and replug and the
+  console stops recognising the pad until the game is restarted. Almost
+  certainly SI error latching: once a channel reports a transfer error the
+  status sticks, and nothing here clears it or re-probes the port the way the
+  `PAD` library's reset path would. The poller rewrites `SIPOLL` every frame
+  but never acknowledges an error, so auto-polling never recovers.
+- **A Wii Remote + Nunchuk is still required.** A GameCube pad in port *N*
+  ought to stand in for player *N* entirely, but the game's own
+  connected-controller gate still has to be satisfied by real Wii hardware.
+  The "No Nunchuk Required" opt-in code below is a blunt version of this — it
+  makes the extension check pass unconditionally. What it should do instead
+  is pass when a Classic Controller, a GameCube pad **or** a Nunchuk is
+  present, so playing with a real Nunchuk still works.
+- **The left drum is less responsive than the right.** Both trigger paths look
+  symmetric in codeB (same `> 0x28` threshold on the two analog bytes), so the
+  asymmetry is probably downstream: the right drum writes the *Wii Remote*
+  shake magnitude at `+0x18`/`+0x1c`, the left drum writes the *Nunchuk* one
+  at `+0x74`/`+0x78`, and those are read through different code with
+  different thresholds — and the Nunchuk side may be gated on a Nunchuk
+  actually being connected, which ties this to the item above.
+- **The post-race tips screen ("Press A to continue") doesn't accept input.**
+  Finishing a Grand Prix stage lands on it and nothing gets past it. That
+  screen presumably reads input through a path the KPAD button-compose hook
+  doesn't cover.
+- The Classic Controller left drum writes the "nunchuk shake" magnitude at
+  KPAD `+0x74`/`+0x78`, which for a Classic Controller is where codeD reads
+  the **right stick** for the IR pointer. So the pointer jerks for the ~4
+  frames of each left-drum hit. Harmless during a race (the pointer is unused
+  there) and you are not drumming in menus, but it is real. Fixing it properly
+  needs codeC to snapshot the right stick before codeB clobbers it.
 - Jump uses a placeholder acceleration vector; real captured values are needed.
   On a Classic Controller jump is reached by hitting both drums at once, so it
   inherits that same limitation.
