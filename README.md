@@ -17,10 +17,12 @@ synthesise the motion the game is looking for from GameCube button and stick sta
 > `main.dol` together).
 >
 > **Still a work in progress** — see "Known issues" for what's broken. The
-> big ones: hot-plugging a GameCube controller stops it being recognised
-> until reboot, the game still insists on a Wii Remote + Nunchuk being
-> connected, the left drum is less responsive than the right, and the
-> post-race "Press A to continue" tips screen doesn't accept input.
+> game still insists on a Wii Remote + Nunchuk being connected, the left
+> drum is less responsive than the right, and the post-race "Press A to
+> continue" tips screen doesn't accept input. Hot-plugging a GameCube
+> controller used to stop it being recognised until reboot; that one has a
+> fix in the poller now, but the fix itself has not been run on hardware
+> yet.
 
 ## Classic Controller
 
@@ -111,6 +113,30 @@ GameCube controller / DK Bongos:
 | Control stick | Nunchuk stick (character movement), with a ±16 deadzone |
 | C-stick | IR pointer position |
 | Start, D-pad, face buttons | Wii Remote / Nunchuk button equivalents |
+
+DK Bongos (TaruKonga) report over the Serial Interface as an ordinary
+GameCube pad with each drum surface wired to a button, so they arrive
+through the same code path and the same table above. Two things are
+specific to them:
+
+- **They are detected by their sticks.** A bongo set has no control stick or
+  C-stick, so both C-stick axes read `0x00` where a real pad idles near
+  `0x80`. `codeA` treats that as "these are bongos" and switches to a
+  bongo-specific button map: `Z` → left drum, `R` → right drum. Everything
+  else (`Start`, the D-pad) still passes through.
+- **A set connected to the Wii through the Wii Remote** (extension type 5)
+  is read from the extension's own button bits instead: bit 0 → left drum,
+  bit 1 → right drum. No SI involved.
+
+| Bongo surface | In-game action |
+| --- | --- |
+| Left drum | Left drum hit |
+| Right drum | Right drum hit |
+| Both drums together | Jump / boost |
+| Start/Pause | Wii Remote `+` |
+
+Steering is unavailable on bongos alone — they have no stick, exactly as on
+the retail game, which pairs bongo hits with Wii Remote tilt.
 
 Player 1 should still have a real Wii Remote + Nunchuk connected — the game gates
 on a connected controller before it will start a race. The GameCube pad is an
@@ -238,15 +264,43 @@ the other path instead — it drives the SI hardware's own auto-polling logic
 so the console fills `INBUFH`/`INBUFL` itself, the same way `PADRead` would if
 this game linked the `PAD` library:
 
-1. Write poll command `0x00400300` to `SIC0OUTBUF` (`0x6400`).
-2. Read `SIPOLL` (`0x6430`); `SIInit` already programmed the X (rate) field,
+1. Acknowledge every channel's latched error status in `SISR` (`0x6438`) —
+   see "Hot-plugging" below.
+2. Write poll command `0x00400300` to each channel's output buffer
+   (`SIC0OUTBUF` `0x6400`, stride `0xC`).
+3. Read `SIPOLL` (`0x6430`); `SIInit` already programmed the X (rate) field,
    so this only needs to force the Y field to 1 poll/frame if it's unset.
-3. OR in `EN0 | VBCPY0` (`0x88`) and write it back to `SIPOLL`.
+4. OR in the enable and copy-on-vblank bits for all four channels (`0xFF`)
+   and write it back to `SIPOLL`.
 
 That's it — no `SICOMCSR` kick, no `TSTART` polling, no interrupt handling.
 The hardware's own auto-poll state machine (the same one `SIInit`/`SIProbe`
 already exercise for the boot-time `SIGetType` probes) takes it from there
 every VBlank.
+
+`SIPOLL`'s low byte is the per-channel control: bits 7–4 are the poll enable
+for channels 0–3, bits 3–0 the matching copy-on-vblank bits. `SISetXY`
+(`0x801f4a9c`) rewrites only X and Y and preserves that byte, so nothing in
+the game ever clears what the poller sets.
+
+#### Hot-plugging
+
+Each channel gets a byte of `SISR` (`0x6438`), channel 0 in the high byte.
+The low nibble of each byte is the latched error status — `NOREP`, `COLL`,
+`OVRUN`, `UNRUN` — and it is **write-1-to-clear**; bits 5 and 4 above it are
+the read-only `RDST`/`WRST` status. Unplugging a controller latches `NOREP`,
+and until something acknowledges it, `ERRSTAT` stays set in `INBUFH`, every
+hook's error check skips injection, and replugging the pad never brings it
+back.
+
+The poller therefore acknowledges the error nibbles every frame before it
+re-arms polling: read `SISR`, mask to `0x0F0F0F0F`, write it back. That's the
+game's own SI library idiom — `SIInterruptHandler` does it a channel at a
+time at `0x801f4574`–`0x801f458c` (`lis 0x0F00`, `sraw` by `chan*8`, `and`,
+store back). Writing a 0 to a write-1-to-clear bit leaves it alone, so
+masking to one channel's nibble is how the SDK avoids acknowledging another
+channel's error by accident; the poller masks to all four because it polls
+all four.
 
 A second variant (`build.py`'s `stash`) is included as a fallback in case the
 `SIPOLL` enable-bit assumption above turns out wrong on real hardware: it
@@ -299,26 +353,48 @@ locals. Skipping that corrupts the caller's frame and crashes.
 
 Found on hardware, in rough priority order:
 
-- **Hot-plugging a GameCube controller breaks it.** Unplug and replug and the
-  console stops recognising the pad until the game is restarted. Almost
-  certainly SI error latching: once a channel reports a transfer error the
-  status sticks, and nothing here clears it or re-probes the port the way the
-  `PAD` library's reset path would. The poller rewrites `SIPOLL` every frame
-  but never acknowledges an error, so auto-polling never recovers.
-- **A Wii Remote + Nunchuk is still required.** A GameCube pad in port *N*
-  ought to stand in for player *N* entirely, but the game's own
-  connected-controller gate still has to be satisfied by real Wii hardware.
-  The "No Nunchuk Required" opt-in code below is a blunt version of this — it
-  makes the extension check pass unconditionally. What it should do instead
-  is pass when a Classic Controller, a GameCube pad **or** a Nunchuk is
-  present, so playing with a real Nunchuk still works.
-- **The left drum is less responsive than the right.** Both trigger paths look
-  symmetric in codeB (same `> 0x28` threshold on the two analog bytes), so the
-  asymmetry is probably downstream: the right drum writes the *Wii Remote*
-  shake magnitude at `+0x18`/`+0x1c`, the left drum writes the *Nunchuk* one
-  at `+0x74`/`+0x78`, and those are read through different code with
-  different thresholds — and the Nunchuk side may be gated on a Nunchuk
-  actually being connected, which ties this to the item above.
+- **Hot-plugging a GameCube controller breaks it** — *fix written, not yet
+  confirmed on hardware.* Unplug and replug and the console stopped
+  recognising the pad until the game was restarted. The cause is SI error
+  latching: `NOREP` sticks in `SISR` and nothing acknowledged it, so
+  `ERRSTAT` stayed set in `INBUFH` and every hook skipped injection forever.
+  The poller now clears the error nibbles each frame — see "Hot-plugging".
+  If replugging still fails after this, the next suspect is that the port
+  also needs a `SIGetType`-style re-probe, not just an error acknowledgement.
+- **A Wii Remote + Nunchuk is still required.** The real blocker is upstream
+  of the extension check: `KPADiRead` early-outs at `0x80247BE0` when the
+  channel's queued-sample count at KPAD `+0x10F` is zero, which is exactly
+  the case with no Wii Remote connected — so none of the four hooks ever run
+  and there is nothing to inject into. Samples are a 16-entry ring of `0x38`
+  bytes at KPAD `+0x110`, with the write index at `+0x10E` and the count at
+  `+0x10F`, filled by the WPAD callback at `0x802485E0`.
+
+  So making a bare GameCube pad drive player *N* means **synthesising a KPAD
+  sample**: the poller hook at `0x80247ADC` runs before that early-out, so it
+  can write a zeroed sample into the ring and set the count to 1 whenever
+  SI reports a valid pad on the channel and no real sample arrived. The
+  hooks downstream already overwrite buttons, motion and stick from SI, so
+  the synthetic sample's contents barely matter — but its device-type byte
+  does (see the next item). Untried.
+
+  The "No Nunchuk Required" opt-in code below is a blunter, narrower thing:
+  it only forces the seven `*(byte*)(x+0x5c) != 0` extension-present checks
+  to pass, which does not help if `KPADiRead` bailed before reaching them.
+- **The left drum is less responsive than the right.** Not a threshold
+  problem — the two trigger paths really are symmetric in `codeA` (same
+  `> 40` compare on both analog bytes, same digital masks). The asymmetry is
+  the *destination*: the right drum writes the Wii Remote motion vector at
+  `+0x4DC`–`+0x4E4` and the left drum writes the Nunchuk one at
+  `+0x4E8`–`+0x4F0`, and only the second is gated. `read_kpad_acc` processes
+  the Wii Remote vector unconditionally, but reaches the Nunchuk vector at
+  `0x802462EC` only if the sample's device-type byte at `+0x36` is **4 or 5**
+  (checked at `0x802462D4`) — anything else branches straight to the
+  function's exit at `0x80246588` and the left drum's motion is simply never
+  read. That byte is written from the WPAD probe result at `0x802485F8`, so
+  it is a Wii-side device type, not something the GameCube pad influences.
+  Forcing it to 4 when a GameCube pad is present should make both drums
+  equally responsive, and is the same lever the synthetic-sample work above
+  needs. Untried.
 - **The post-race tips screen ("Press A to continue") doesn't accept input.**
   Finishing a Grand Prix stage lands on it and nothing gets past it. That
   screen presumably reads input through a path the KPAD button-compose hook
