@@ -384,6 +384,59 @@ locals. Skipping that corrupts the caller's frame and crashes.
 
 Found on hardware, in rough priority order:
 
+- **A second Wii Remote crashes or blackscreens the game** — *fixed, not yet
+  confirmed on hardware.* The `ad51366` fix relaxed `CNunchakaCheck`'s two
+  extension-type branches (`0x80179990`/`0x80179F94`) by skipping them
+  outright, so *any connected* channel passed regardless of what was plugged
+  into it. That was too broad: a bare second Wii Remote with nothing
+  attached is "connected" but has extension type 0, so it passed the gate
+  and the game then read Nunchuk-shaped data that was never populated for
+  it — crashing mid-race when a second remote joined during play, and
+  blackscreening when one was already connected at boot. Fixed by relaxing
+  the two `cmplwi r0,1` compares (at `0x8017998C`/`0x80179F90`, immediately
+  before each branch) to `cmplwi r0,0` instead of touching the branches —
+  the gate now passes for "any extension present" (Nunchuk=1, Classic=2,
+  Bongo=5, our synthetic GC device type=4) but still correctly rejects
+  extension 0 (nothing attached), matching vanilla behaviour for a bystander
+  who connects a bare second remote.
+- **Hot-plugging a GameCube controller breaks it, and does not recover on a
+  soft Reset from the HOME Menu** — *still open.* The poller's `SIGetType`
+  reprobe (see below) did not resolve this on hardware; a soft reset alone
+  isn't enough to reinitialise SI channel state either, which points at
+  something stickier than the per-frame software poll — possibly SI channel
+  state the console's own firmware/driver layer caches across the game's own
+  `SIInit`. Needs a hardware session with the poller instrumented (e.g. an
+  on-screen SISR/INBUFH dump) to see what state actually differs before vs.
+  after a failed reconnect.
+- **A Classic Controller's left shoulder and IR-pointer stick stop working
+  after a GameCube-controller hot-plug failure** — *still open, likely
+  downstream of the hot-plug bug above.* Reported specifically after a GC
+  controller connected to Port 1 stopped being recognised post-reset; not
+  yet reproduced/isolated independently of that state.
+- **A GameCube controller in Port 2 still needs a real Wii Remote connected
+  to register the player** — *not yet implemented.* `codeE` (see
+  "Synthesising a sample") only solves the per-frame *KPAD sample* problem —
+  it makes `KPADiRead` stop early-outing once a channel has no Wii Remote
+  and gives it something to inject into. Player *presence* at the join/
+  character-select screen is a separate, earlier gate: `CNunchakaCheck`
+  loops over channels and, before it even checks extension type, calls a
+  virtual "is this channel connected" method (`vtable[3]`, dispatched off a
+  singleton at `-0x5E44(r13)+0xC`) that appears to reflect real WPAD/
+  Bluetooth pairing state, not anything KPAD-level. Making a bare GameCube
+  pad register as a present player means finding and patching that
+  connected-check call site(s) too — same shape of fix as the
+  `CNunchakaCheck` extension patch above, but its result is very likely used
+  well beyond this one screen (pause menu, player-count HUD, etc.), so it
+  needs its own dedicated investigation rather than a guess shipped blind.
+- **A Classic Controller in the Wii Remote's Player 1 slot overrides rather
+  than merges with a GameCube controller in Port 1** — *not yet
+  implemented.* Today `codeA`/`codeB`/`codeC`/`codeD` read *either* the CC
+  extension (`ext==2`) *or* SI/GC data per hook, never both — see each
+  hook's `bne`/`beq` fork on `lbz r10, 0x5C(3x)`. OR-ing the two input
+  sources together (so either controller can drive Port 1 without a Wii
+  Remote conceptually being "needed" at all) is a reasonable follow-up once
+  the Port 2 registration gate above is solved, since both changes touch the
+  same "what counts as a valid controller" logic.
 - **Hot-plugging a GameCube controller breaks it** — *revised fix written,
   not yet confirmed on hardware.* Unplug and replug and the console stopped
   recognising the pad until the game was restarted. The cause is SI error

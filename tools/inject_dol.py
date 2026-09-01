@@ -31,13 +31,21 @@ HOOK_PREIMAGE = {
     0x80247500: 0x83E1001C,
     0x80247BE0: 0x881F010F,
 }
-NUNCHUK_CHECK_BRANCHES = {
-    # CNunchakaCheck::update checks that every connected Wii Remote reports
-    # extension type 1 (Nunchuk).  Skipping these two failure branches keeps
-    # the screen's player-presence logic intact while accepting Classic
-    # Controllers as well.
-    0x80179990: 0x40820018,
-    0x80179F94: 0x40820030,
+NUNCHUK_CHECK_COMPARES = {
+    # CNunchakaCheck::update runs `cmplwi r0,1; bne <fail>` per connected
+    # channel, requiring extension type == 1 (Nunchuk) exactly.  Relaxing
+    # the immediate to 0 makes the gate "some extension is present" instead
+    # (type 0 is the SDK's "no extension" value), which still accepts
+    # Nunchuk(1), Classic(2), Bongo(5) and our synthetic GC device type(4)
+    # but -- unlike unconditionally skipping the branch -- still REJECTS a
+    # bare second Wii Remote with nothing attached. That distinction matters:
+    # the earlier unconditional bypass made CNunchakaCheck treat any merely
+    # *connected* channel as passing regardless of extension, so a second
+    # Wii Remote with no Nunchuk/Classic attached was silently accepted and
+    # then read as if it had valid Nunchuk data further downstream --
+    # crashing mid-race or blackscreening at boot.
+    0x8017998C: 0x28000001,
+    0x80179F90: 0x28000001,
 }
 
 
@@ -134,16 +142,16 @@ def inject(src, dst):
                 f'hook 0x{hook:08X}: expected 0x{expected:08X}, found 0x{got:08X} '
                 f'(wrong revision or already patched)')
 
-    # Patch only CNunchakaCheck's two extension-type rejection branches.  An
-    # earlier revision changed seven unrelated object-state comparisons and
-    # could crash menus or multiplayer setup.
-    for address, expected in NUNCHUK_CHECK_BRANCHES.items():
+    # Relax CNunchakaCheck's two extension-type comparisons from "==1" to
+    # "!=0" (see NUNCHUK_CHECK_COMPARES). The branch instructions themselves
+    # are left untouched -- only the immediate each compares against changes.
+    for address, expected in NUNCHUK_CHECK_COMPARES.items():
         got = struct.unpack('>I', d.read(address, 4))[0]
         if got != expected:
             raise AssertionError(
-                f'Nunchuk check 0x{address:08X}: expected 0x{expected:08X}, '
+                f'Nunchuk check compare 0x{address:08X}: expected 0x{expected:08X}, '
                 f'found 0x{got:08X}')
-        d.write(address, struct.pack('>I', 0x60000000))
+        d.write(address, struct.pack('>I', expected & 0xFFFF0000))
 
     blob = bytearray()
     locations = {}
