@@ -6,15 +6,25 @@
     # Software cannot write those result registers -- that was the bug that
     # made the earlier build work in Dolphin and nowhere else.
     #
-    # Exactly 27 words: the codehandler overwrites word 28 with the branch
-    # back, and the injected code list fills its segment with no slack, so
-    # this must not grow. (tools/build_full_dol.py can grow the list, but the
-    # plain .ini and static-patch paths cannot.)
+    # SIGetType is deliberately called for the current channel each pass. Its
+    # SDK implementation caches/throttles probes, but schedules a fresh type
+    # transfer after disconnect/error, which is what makes a reinserted pad
+    # come back without rebooting the game.
 
     stwu    1, -0x20(1)
     stw     0, 0x1c(1)
     stw     3, 0x18(1)
     stw     4, 0x14(1)
+    mflr    0
+    stw     0, 0x0c(1)
+
+    lis     12, 0x801f
+    ori     12, 12, 0x4fa0      # si::SIGetType(channel)
+    mtctr   12
+    bctrl
+    lwz     0, 0x0c(1)
+    mtlr    0
+    lwz     3, 0x18(1)          # restore channel argument
     lis     3, 0xCD00
 
     # Acknowledge every channel's latched error status (NOREP/COLL/OVRUN/

@@ -31,10 +31,14 @@ HOOK_PREIMAGE = {
     0x80247500: 0x83E1001C,
     0x80247BE0: 0x881F010F,
 }
-EXTENSION_GATE_SITES = [
-    0x8011859C, 0x80119D34, 0x8011F4B8, 0x8012C8AC,
-    0x80138248, 0x80148498, 0x80159648,
-]
+NUNCHUK_CHECK_BRANCHES = {
+    # CNunchakaCheck::update checks that every connected Wii Remote reports
+    # extension type 1 (Nunchuk).  Skipping these two failure branches keeps
+    # the screen's player-presence logic intact while accepting Classic
+    # Controllers as well.
+    0x80179990: 0x40820018,
+    0x80179F94: 0x40820030,
+}
 
 
 def branch(src, dst):
@@ -130,15 +134,16 @@ def inject(src, dst):
                 f'hook 0x{hook:08X}: expected 0x{expected:08X}, found 0x{got:08X} '
                 f'(wrong revision or already patched)')
 
-    # Preserve real-Nunchuk support while removing the game's hard physical-
-    # extension gate.  These comparisons follow byte loads, so -1 can never
-    # match and the existing "extension present" path is always selected.
-    for address in EXTENSION_GATE_SITES:
+    # Patch only CNunchakaCheck's two extension-type rejection branches.  An
+    # earlier revision changed seven unrelated object-state comparisons and
+    # could crash menus or multiplayer setup.
+    for address, expected in NUNCHUK_CHECK_BRANCHES.items():
         got = struct.unpack('>I', d.read(address, 4))[0]
-        if got != 0x2C000000:
+        if got != expected:
             raise AssertionError(
-                f'extension gate 0x{address:08X}: expected 0x2C000000, found 0x{got:08X}')
-        d.write(address, struct.pack('>I', 0x2C00FFFF))
+                f'Nunchuk check 0x{address:08X}: expected 0x{expected:08X}, '
+                f'found 0x{got:08X}')
+        d.write(address, struct.pack('>I', 0x60000000))
 
     blob = bytearray()
     locations = {}

@@ -86,17 +86,16 @@ Without it, physically moving the Wii Remote you're required to keep
 connected (see "What is mapped") would add its own spurious drum hits on top
 of the Classic Controller's.
 
-## No Nunchuk Required (opt-in)
+## Classic Controller without a Nunchuk
 
-A second, independent Gecko code in the same file: seven call sites gate
-per-extension setup on `*(byte*)(param+0x5c) != 0`, i.e. some extension being
-physically connected. Patching each site's `cmpwi r0,0` to `cmpwi r0,-1`
-(a value the byte can never hold) makes that branch always taken, so a
-Classic Controller or GameCube pad works without a physical Nunchuk also
-being plugged into the Wii Remote. Ships as its own `$`-titled block —
-enable it separately from the main code in Dolphin's Gecko Codes list if you
-need it. `tools/nonunchuk.py` verifies all seven pre-images against the DOL
-before writing.
+The patch targets the actual `CNunchakaCheck` screen. Two branches in that
+class reject a connected player unless the extension query returns exactly
+`1` (Nunchuk); skipping only those rejection branches lets a Classic
+Controller pass while preserving the screen's player-presence logic.
+
+An earlier seven-site patch was incorrect: Ghidra analysis showed those were
+unrelated gameplay object-state checks. It has been removed because it could
+corrupt menu or multiplayer state and cause blackscreens/crashes.
 
 ## What is mapped
 
@@ -385,14 +384,14 @@ locals. Skipping that corrupts the caller's frame and crashes.
 
 Found on hardware, in rough priority order:
 
-- **Hot-plugging a GameCube controller breaks it** — *fix written, not yet
-  confirmed on hardware.* Unplug and replug and the console stopped
+- **Hot-plugging a GameCube controller breaks it** — *revised fix written,
+  not yet confirmed on hardware.* Unplug and replug and the console stopped
   recognising the pad until the game was restarted. The cause is SI error
   latching: `NOREP` sticks in `SISR` and nothing acknowledged it, so
   `ERRSTAT` stayed set in `INBUFH` and every hook skipped injection forever.
-  The poller now clears the error nibbles each frame — see "Hot-plugging".
-  If replugging still fails after this, the next suspect is that the port
-  also needs a `SIGetType`-style re-probe, not just an error acknowledgement.
+  The poller clears the error nibbles and calls the SDK's throttled
+  `SIGetType` path for the current channel, causing a disconnected channel
+  to be probed again after the controller is reinserted.
 - **A Wii Remote + Nunchuk is still required** — *fix written, not yet run.*
   The real blocker is upstream
   of the extension check: `KPADiRead` early-outs at `0x80247BE0` when the
@@ -406,16 +405,10 @@ Found on hardware, in rough priority order:
   GameCube pad should be able to drive player *N* on its own. **Written and
   statically verified, but not yet run** — on hardware or in Dolphin.
 
-  Note that this is deliberately inert whenever a real Wii Remote is
-  streaming: `codeE` only acts when the channel's sample count is zero, so
-  it changes nothing about how the hack behaves today with a Wii Remote and
-  Nunchuk connected. Playing with a real Nunchuk keeps working by
-  construction — which is the part the "No Nunchuk Required" opt-in below
-  gets wrong. That code is a blunter, narrower thing: it forces the seven
-  `*(byte*)(x+0x5c) != 0` extension-present checks to pass unconditionally,
-  which doesn't help if `KPADiRead` bailed before reaching them. It may
-  still be needed alongside `codeE` if those checks turn out to gate
-  something on the synthetic channel.
+  `codeE` is deliberately inert whenever a real Wii Remote sample is queued,
+  and now also refuses to synthesize over any active extension state. This
+  prevents a transient empty queue from replacing Classic Controller or
+  Nunchuk state when a GameCube controller is present on the same channel.
 - **The left drum was less responsive than the right.** The clean injector
   holds the left stroke for six frames instead of four so it survives the
   weaker Nunchuk-side processing. This is implemented and statically verified;

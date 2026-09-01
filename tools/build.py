@@ -19,9 +19,10 @@ Two poller variants, chosen at patch time -- see README for the tradeoff:
     reads there instead of the hardware-only SIC0INBUFH/L registers.
     Needs 10 extra word patches inside codeA-D.
 
-Both were sized to exactly 27 words + 1 spare (28 total, NN=0xE) so either
-drops into the poller's C2 slot without shifting anything after it -- that
-matters because the injected code list fills its segment with zero slack.
+The legacy stash body still fits the original 27-word + spare in-place slot.
+The autopoll body is larger now that it preserves LR and calls `SIGetType` to
+re-probe hot-plugged controllers; use the clean injector or full-DOL builder
+for static output. Gecko text supports either size.
 
 The root bug this fixes: SIC0INBUFH/L are hardware-written auto-poll result
 registers. Software stores to them (what the original v24 poller did) are
@@ -31,15 +32,16 @@ is why the original patches worked in an emulator and nowhere else.
 import struct
 
 # ------------------------------------------------------------- poller bodies
-# Each is exactly 27 assembled words; a 28th all-zero spare word is appended
-# at build time -- the codehandler overwrites that slot with the branch back
-# to the original instruction, same convention as every other Gecko C2 code.
+# A spare word is appended at build time; the codehandler overwrites it with
+# the branch back to the original instruction, like every other Gecko C2 code.
 POLLER_HOOK = 0x80247adc  # original site: si::__SITransfer's poll-request path
 POLLER_BODY_RAM = 0x800022b8  # where the poller's C2 body lives in this DOL
 
 # assembled from src/poller_autopoll.s -- keep the two in step
 POLLER_AUTOPOLL = [
-    0x9421FFE0, 0x9001001C, 0x90610018, 0x90810014, 0x3C60CD00, 0x80836438,
+    0x9421FFE0, 0x9001001C, 0x90610018, 0x90810014, 0x7C0802A6, 0x9001000C,
+    0x3D80801F, 0x618C4FA0, 0x7D8903A6, 0x4E800421, 0x8001000C, 0x7C0803A6,
+    0x80610018, 0x3C60CD00, 0x80836438,
     0x3C000F0F, 0x60000F0F, 0x7C840038, 0x90836438, 0x3C000040, 0x60000300,
     0x90036400, 0x9003640C, 0x90036418, 0x90036424, 0x80036430, 0x7004FF00,
     0x40820008, 0x60000100, 0x600000FF, 0x90036430, 0x8001001C, 0x80610018,
@@ -79,7 +81,8 @@ VARIANTS = {
 
 def poller_gecko_lines(variant):
     words = list(VARIANTS[variant]) + [0x60000000]
-    assert len(words) == 28
+    if len(words) & 1:
+        words.append(0)
     nn = len(words) // 2
     out = [f'C2{POLLER_HOOK & 0x01FFFFFF:06X} {nn:08X}']
     for i in range(0, len(words), 2):
@@ -90,7 +93,9 @@ def poller_gecko_lines(variant):
 def static_patches(variant):
     """(vaddr, bytes) list for a direct main.dol patch."""
     words = list(VARIANTS[variant]) + [0x60000000]
-    assert len(words) == 28
+    if len(words) != 28:
+        raise ValueError(f'{variant} no longer fits the legacy 28-word in-place slot; '
+                         'use inject_dol.py or build_full_dol.py')
     patches = [(POLLER_BODY_RAM, b''.join(struct.pack('>I', w) for w in words))]
     if variant == 'stash':
         for addr, _old, new in STASH_HOOK_PATCHES:

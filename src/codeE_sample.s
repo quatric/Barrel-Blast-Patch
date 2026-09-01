@@ -39,6 +39,10 @@
     cmpwi   3, 0
     bne     done                # a real Wii Remote sample is queued; hands off
 
+    lbz     3, 0x5c(31)         # active Wii extension type
+    cmpwi   3, 0
+    bne     done                # never synthesize over Classic/Nunchuk state
+
     cmpwi   27, 4
     bge     done                # channel out of range
 
