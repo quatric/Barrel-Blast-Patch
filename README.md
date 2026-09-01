@@ -16,13 +16,11 @@ synthesise the motion the game is looking for from GameCube button and stick sta
 > `tools/build_full_dol.py` (poller + Classic Controller baked into
 > `main.dol` together).
 >
-> **Still a work in progress** — see "Known issues" for what's broken. The
-> game still insists on a Wii Remote + Nunchuk being connected, the left
-> drum is less responsive than the right, and the post-race "Press A to
-> continue" tips screen doesn't accept input. Hot-plugging a GameCube
-> controller used to stop it being recognised until reboot; that one has a
-> fix in the poller now, but the fix itself has not been run on hardware
-> yet.
+> **Still a work in progress** — the clean-disc injector now includes
+> hot-plug recovery, bare-GC sample synthesis, four-channel routing, balanced
+> left-stroke timing, and the corrected pointer-hook layout. These repairs are
+> statically and WBFS-round-trip verified, but still need a final real-console
+> regression pass.
 
 ## Classic Controller
 
@@ -163,14 +161,15 @@ addresses are hardcoded and will crash on other regions.
 
 ### Patcher tool
 
-`tools/gui.py` bakes the codes directly into a copy of a disc image instead
+`tools/gui.py` bakes the codes directly into a disc image instead
 of relying on a Gecko loader at runtime — drop a `.wbfs` or `.iso` on the
 window (or a prebuilt binary from a [release](../../releases), which bundles
 [Wiimms ISO Tool](https://wit.wiimm.de/) so you don't need to install it) and
 it patches `sys/main.dol` in place, keeping the original alongside as
-`<name>.bak`. Pick `autopoll` (default) or `stash` from the window before
-dropping the image — see "Reading the GameCube controller" above for what the
-two variants actually do differently.
+`<name>.bak`. The clean-disc injector appends a normal executable DOL text
+section, places all six hook bodies there, and replaces the verified retail
+instructions with direct branches. It therefore does not need a Gecko loader
+or the lost historical pre-patched DOL.
 
 **The tool never ships or touches anyone else's copy of the game** — it only
 operates on a disc image you already have locally. `tools/build.py` is the
@@ -180,16 +179,10 @@ base DOL against the exact bytes these offsets were computed against before
 writing anything, so a foreign or already-patched dump fails loudly instead
 of silently corrupting.
 
-**This is not yet a from-scratch injector.** `static_patches()` writes into a
-fixed set of addresses (`POLLER_BODY_RAM` and, for `stash`, ten more inside
-codeA-D) that only exist because those five Gecko codes were already baked
-into the DOL by an earlier, undocumented process — the tool patches an
-*already-modified* build further, it doesn't inject the codehandler system
-into a genuinely clean retail dump. Point it at a clean `.wbfs` extracted
-straight from your own disc and `verify_patches()` will correctly refuse:
-`POLLER_BODY_RAM` isn't mapped there at all. Actually supporting a clean dump
-needs a new DOL segment, a codehandler-installer stub, and hook-table entries
-for codeA-D — none of that exists yet.
+`tools/build.py` remains the legacy in-place poller helper for historical
+already-baked DOLs. The GUI uses `tools/inject_dol.py`, which supports a clean
+USA retail dump and checks every hook and extension-gate pre-image before it
+writes anything. Other regions and already-patched images fail safely.
 
 ## Sources
 
@@ -423,7 +416,10 @@ Found on hardware, in rough priority order:
   which doesn't help if `KPADiRead` bailed before reaching them. It may
   still be needed alongside `codeE` if those checks turn out to gate
   something on the synthetic channel.
-- **The left drum is less responsive than the right.** Not a threshold
+- **The left drum was less responsive than the right.** The clean injector
+  holds the left stroke for six frames instead of four so it survives the
+  weaker Nunchuk-side processing. This is implemented and statically verified;
+  hardware confirmation remains. It was not a threshold
   problem — the two trigger paths really are symmetric in `codeA` (same
   `> 40` compare on both analog bytes, same digital masks). The asymmetry is
   the *destination*: the right drum writes the Wii Remote motion vector at
@@ -448,27 +444,24 @@ Found on hardware, in rough priority order:
   separate arithmetic, and they have not been compared instruction by
   instruction yet. Confirming what a real Nunchuk reports at `+0x36` is a
   one-line read in Dolphin and should come first.
-- **The post-race tips screen ("Press A to continue") doesn't accept input.**
-  Finishing a Grand Prix stage lands on it and nothing gets past it. That
-  screen presumably reads input through a path the KPAD button-compose hook
-  doesn't cover.
-- The Classic Controller left drum writes the "nunchuk shake" magnitude at
+- **The post-race tips failure came from the historical baked codeD layout.**
+  That DOL had ten leading pad words but branched over only eight, allowing the
+  IR/pointer path used by the tips screen to execute zero data. Clean injection
+  uses the internally correct eight-word/`b +0x24` body and direct hook
+  placement. Console confirmation remains.
+- The Classic Controller left drum used to write the "nunchuk shake" magnitude at
   KPAD `+0x74`/`+0x78`, which for a Classic Controller is where codeD reads
   the **right stick** for the IR pointer. So the pointer jerks for the ~4
-  frames of each left-drum hit. Harmless during a race (the pointer is unused
-  there) and you are not drumming in menus, but it is real. Fixing it properly
-  needs codeC to snapshot the right stick before codeB clobbers it.
+  frames of each left-drum hit. Injected codeD now reads the preserved right
+  stick at `+0x7c`/`+0x80`, so drum motion at `+0x74`/`+0x78` no longer jerks
+  the pointer.
 - Jump uses a placeholder acceleration vector; real captured values are needed.
   On a Classic Controller jump is reached by hitting both drums at once, so it
   inherits that same limitation.
-- 4-player support exists as a variant that round-robins the SI channel each frame,
-  but is not included here pending single-player console verification. Note that
-  channel 1 detection is broken in codeB/codeC/codeD regardless: they build the
-  channel-1 base with `ori rX,rX,0x524` where an **add** was meant, and
-  `0x803C91C0 | 0x524` is `0x803C95E4`, not `0x803C96E4`. Channels 0, 2 and 3
-  use correct absolute constants. Channel 3 additionally reaches codeB's shared
-  drum logic by fallthrough rather than through a branch, so it is GameCube-only
-  — the Classic Controller check is not on that path.
+- Clean injection fixes four-player routing: channel 1 uses `addi` rather than
+  `ori` to form `0x803C96E4`, and channel 3 has an explicit stub into the shared
+  Classic/GameCube controller check. The poller already enables all four SI
+  channels. Multiplayer still needs console testing.
 - USA (`RDKE01`) only.
 - The `autopoll` poller's hook installs correctly and runs without crashing in
   Dolphin (checked with a GDB-stub debugger against the compiled code, not

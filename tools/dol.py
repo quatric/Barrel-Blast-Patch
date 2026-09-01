@@ -38,6 +38,35 @@ class Dol:
     def save(self, path):
         open(path, 'wb').write(self.data)
 
+    def add_text_section(self, va, data, alignment=0x20):
+        """Append a new executable section and return its DOL section index.
+
+        DOL has seven text-section slots (indices 0..6).  Retail DKBB uses
+        only two, so a clean injector can add code without relocating any of
+        the game's existing sections.
+        """
+        index = next((i for i in range(7) if not self.size[i]), None)
+        if index is None:
+            raise ValueError('DOL has no free text-section slot')
+        if va & (alignment - 1):
+            raise ValueError(f'text-section address 0x{va:08X} is not {alignment:#x}-aligned')
+        end = va + len(data)
+        for _o, addr, size, _i in self.secs:
+            if va < addr + size and addr < end:
+                raise ValueError(
+                    f'new text section 0x{va:08X}-0x{end:08X} overlaps '
+                    f'0x{addr:08X}-0x{addr + size:08X}')
+
+        fileoff = (len(self.data) + alignment - 1) & -alignment
+        self.data.extend(b'\0' * (fileoff - len(self.data)))
+        self.data.extend(data)
+        self.off[index], self.addr[index], self.size[index] = fileoff, va, len(data)
+        struct.pack_into('>I', self.data, index * 4, fileoff)
+        struct.pack_into('>I', self.data, 0x48 + index * 4, va)
+        struct.pack_into('>I', self.data, 0x90 + index * 4, len(data))
+        self.secs.append((fileoff, va, len(data), index))
+        return index
+
     def dump(self):
         for o,a,s,i in self.secs:
             kind = 'text' if i < 7 else 'data'

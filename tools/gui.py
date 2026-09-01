@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
 """Drag-and-drop GC/Bongos patcher: drop a disc image on the window, done.
 
-Extracts the disc, checks sys/main.dol against the exact bytes these patches
-were computed against (build.verify_patches -- refuses to touch a foreign or
-already-patched dump instead of guessing), writes the chosen poller variant
-plus the DK controller hooks, and rebuilds via wit (Wiimms ISO Tool).
+Extracts the disc, checks sys/main.dol against the exact USA retail hook
+instructions, adds an executable DOL section containing all six controller
+hooks, branches to them directly, and rebuilds via wit (Wiimms ISO Tool).
 
 The rebuilt image replaces the original *in place*, keeping its filename and
 folder -- USB loaders key off the `/wbfs/<Title> [ID6]/` layout, so a renamed
 file next to it can leave the loader unable to find the title. The untouched
 original is kept alongside as `<name>.bak`.
 
-Two poller variants (see README for the tradeoff between them):
-  autopoll (default) -- programs real SI hardware auto-polling.
-  stash              -- doesn't touch SIPOLL; stashes an immediate-transfer
-                         response in RAM instead. Try this if autopoll
-                         doesn't work on your console.
-
-Needs a dump where codeA-D and the poller are already baked into main.dol --
-see build.py's module docstring. A genuinely clean retail dump has none of
-that, and verify_patches() will correctly refuse it (POLLER_BODY_RAM isn't
-mapped there).
+The injector uses the auto-poll implementation confirmed by the hardware
+investigation.  It accepts a clean RDKE01 retail DOL and deliberately refuses
+other revisions or an already-patched image.
 """
 import os
 import queue
@@ -30,11 +22,10 @@ import sys
 import tempfile
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import build
-from dol import Dol
+import inject_dol
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -103,13 +94,14 @@ def run_patch(image_path, variant, log, done):
             if not dol_path or os.path.basename(os.path.dirname(dol_path)) != 'sys':
                 raise RuntimeError('could not find sys/main.dol in the extracted disc')
 
-            d = Dol(dol_path)
-            build.verify_patches(d, variant)
-
-            for va, blob in build.static_patches(variant):
-                d.write(va, blob)
-            d.save(dol_path)
-            log('  patched main.dol (%s poller)' % variant)
+            if variant != 'autopoll':
+                raise RuntimeError(
+                    'the clean-disc injector currently supports the auto-poll variant only')
+            patched_dol = dol_path + '.patched'
+            section, hooks, size = inject_dol.inject(dol_path, patched_dol)
+            os.replace(patched_dol, dol_path)
+            log('  injected %d hooks into DOL text section %d (%d bytes)' %
+                (len(hooks), section, size))
 
             staged = os.path.join(tmp, 'patched.img')
             log('rebuilding...')
@@ -145,13 +137,8 @@ class App(BASE):
         self.busy = False
 
         self.variant = tk.StringVar(value='autopoll')
-        variant_row = tk.Frame(self)
-        variant_row.pack(fill='x', padx=10, pady=(10, 0))
-        tk.Label(variant_row, text='Poller:').pack(side='left')
-        ttk.Radiobutton(variant_row, text='auto-poll (default)', variable=self.variant,
-                         value='autopoll').pack(side='left', padx=(8, 0))
-        ttk.Radiobutton(variant_row, text='stash (fallback)', variable=self.variant,
-                         value='stash').pack(side='left', padx=(8, 0))
+        tk.Label(self, text='Clean-disc injector · auto-poll SI').pack(
+            fill='x', padx=10, pady=(10, 0))
 
         hint = ('Drop a .wbfs or .iso here\n\n(or click to choose one)'
                 if HAVE_DND else 'Click to choose a .wbfs or .iso')
