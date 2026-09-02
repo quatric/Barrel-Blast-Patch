@@ -384,7 +384,7 @@ locals. Skipping that corrupts the caller's frame and crashes.
 
 Found on hardware, in rough priority order:
 
-- **A second Wii Remote crashes or blackscreens the game** — *fixed, not yet
+- **A second Wii Remote crashes or blackscreens the game** — *fixed,
   confirmed on hardware.* The `ad51366` fix relaxed `CNunchakaCheck`'s two
   extension-type branches (`0x80179990`/`0x80179F94`) by skipping them
   outright, so *any connected* channel passed regardless of what was plugged
@@ -428,6 +428,41 @@ Found on hardware, in rough priority order:
   `CNunchakaCheck` extension patch above, but its result is very likely used
   well beyond this one screen (pause menu, player-count HUD, etc.), so it
   needs its own dedicated investigation rather than a guess shipped blind.
+- **The IR pointer (menu cursor, e.g. character/course select) does not
+  move for player 2** — *still open, root cause partially traced.* Confirmed
+  on hardware for both a GameCube controller and a Classic Controller in
+  Port/slot 2 (both paired with a real Wii Remote so the channel registers
+  at all); player 1 works fine with the same hardware, and pointing the
+  actual IR sensor bar at a real second Wii Remote doesn't help either — so
+  this isn't about missing "dots" data or an SI-port/channel-arithmetic bug
+  specific to GC code (a Classic Controller never touches SI at all and
+  fails identically). The bug tracks the *player 2* role, not the device.
+
+  Tracing the game's per-channel KPAD-update function (`0x80247adc`, the
+  same function containing the poller/button/IR hooks) found that it reads
+  a repacked local-stack copy of the live sample (`r19`, an offset-preserving
+  copy of `sample_base+0`) and dispatches on the signed byte at `r19+0x29`
+  — the same field `codeE_sample.s` documents as "extension error, must be
+  0" for its own synthetic sample:
+    - `== 0` calls `0x80247864` (not the IR routine)
+    - `> 0` skips entirely
+    - `== -7` is the *only* value that reaches `0x802470c0`, which is what
+      calls the IR-pointer routine containing our `codeD` hook (`0x80247500`)
+    - any other negative value is also skipped
+
+  This looked at first like it could be explained by `codeE`'s own write of
+  `+0x29 = 0` for a synthesized sample — but `codeE` only fires when
+  `ext == 0`, and never touches a Classic Controller channel at all, so it
+  cannot be the whole story for the CC-on-port-2 case. The dispatch is
+  channel-specific rather than device-specific, which points at the game's
+  own per-channel sample population — the real Wii Remote's WPAD callback at
+  `0x802485C8`/`0x802485E0` — as the more likely place `+0x29` (or something
+  read alongside it) ends up different for channel 1 than channel 0. Not
+  yet traced further; needs either a live memory watch on hardware/Dolphin
+  comparing `+0x29` (and the `-7` classification) between channels 0 and 1,
+  or continued static tracing from the WPAD callback forward. Blind-patching
+  this without that verification isn't worth the regression risk, since the
+  byte is reused for at least one unrelated check (`0x802462BC`).
 - **A Classic Controller in the Wii Remote's Player 1 slot overrides rather
   than merges with a GameCube controller in Port 1** — *not yet
   implemented.* Today `codeA`/`codeB`/`codeC`/`codeD` read *either* the CC
