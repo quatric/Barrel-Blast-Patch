@@ -9,8 +9,14 @@ Two poller variants, chosen at patch time -- see README for the tradeoff:
   autopoll (default): programs SI hardware auto-polling (SICnOUTBUF + SIPOLL
     enable bits, all four channels) so the console's own SI logic fills
     SICnINBUFH/L each frame, and acknowledges latched SI error status so a
-    replugged controller recovers. Zero changes to codeA-D -- only the
-    poller body changes. See src/poller_autopoll.s.
+    replugged controller recovers. Also carries a watchdog for si::'s own
+    single global "transfer busy" flag (0x80331538): nothing in the retail
+    binary ever times it out, so an unplug mid-transfer that skips the
+    TC-complete interrupt path can wedge it and silently kill SI for every
+    channel, not just the dead one -- see src/poller_autopoll.s. Not yet
+    confirmed on hardware as the actual cause of the "hot-plug doesn't
+    recover" bug; this is the leading hypothesis from static analysis.
+    Zero changes to codeA-D -- only the poller body changes.
 
   stash: doesn't touch SIPOLL at all. Issues an SI immediate transfer and
     stashes the response (read from the I/O buffer at 0xCD006480, which
@@ -41,11 +47,20 @@ POLLER_BODY_RAM = 0x800022b8  # where the poller's C2 body lives in this DOL
 POLLER_AUTOPOLL = [
     0x9421FFE0, 0x9001001C, 0x90610018, 0x90810014, 0x7C0802A6, 0x9001000C,
     0x3D80801F, 0x618C4FA0, 0x7D8903A6, 0x4E800421, 0x8001000C, 0x7C0803A6,
-    0x80610018, 0x3C60CD00, 0x80836438,
-    0x3C000F0F, 0x60000F0F, 0x7C840038, 0x90836438, 0x3C000040, 0x60000300,
-    0x90036400, 0x9003640C, 0x90036418, 0x90036424, 0x80036430, 0x7004FF00,
-    0x40820008, 0x60000100, 0x600000FF, 0x90036430, 0x8001001C, 0x80610018,
-    0x80810014, 0x38210020, 0x9421FF40,
+    0x80610018, 0x3C60CD00, 0x80836438, 0x3C000F0F, 0x60000F0F, 0x7C840038,
+    0x90836438, 0x3C000040, 0x60000300, 0x90036400, 0x9003640C, 0x90036418,
+    0x90036424, 0x80036430, 0x7004FF00, 0x40820008, 0x60000100, 0x600000FF,
+    0x90036430,
+    # hot-plug watchdog for si::'s single global transfer-busy flag -- see
+    # src/poller_autopoll.s for the full writeup
+    0x3CA08033, 0x60A51538, 0x80C50000, 0x3CE0803C, 0x60E79100,
+    0x2C06FFFF, 0x4082000C, 0x39000000, 0x4800006C, 0x81070000, 0x39080001,
+    0x2C0800F0, 0x4180005C, 0x7D2802A6, 0x91210010, 0x3D80801C, 0x618C3A40,
+    0x7D8903A6, 0x4E800421, 0x7C691B78, 0x3CA08033, 0x60A51538, 0x38C0FFFF,
+    0x90C50000, 0x3CC0CD00, 0x3C008000, 0x90066434, 0x7D234B78, 0x3D80801C,
+    0x618C3A68, 0x7D8903A6, 0x4E800421, 0x81210010, 0x7D2803A6, 0x39000000,
+    0x91070000,
+    0x8001001C, 0x80610018, 0x80810014, 0x38210020, 0x60000000, 0x9421FF40,
 ]
 
 POLLER_STASH = [

@@ -400,14 +400,39 @@ Found on hardware, in rough priority order:
   extension 0 (nothing attached), matching vanilla behaviour for a bystander
   who connects a bare second remote.
 - **Hot-plugging a GameCube controller breaks it, and does not recover on a
-  soft Reset from the HOME Menu** — *still open.* The poller's `SIGetType`
-  reprobe (see below) did not resolve this on hardware; a soft reset alone
-  isn't enough to reinitialise SI channel state either, which points at
-  something stickier than the per-frame software poll — possibly SI channel
-  state the console's own firmware/driver layer caches across the game's own
-  `SIInit`. Needs a hardware session with the poller instrumented (e.g. an
-  on-screen SISR/INBUFH dump) to see what state actually differs before vs.
-  after a failed reconnect.
+  soft Reset from the HOME Menu** — *watchdog written and statically
+  verified end-to-end (assembled, injected into a real retail DOL,
+  disassembled and checked instruction-by-instruction against intent), not
+  yet confirmed on hardware.* Traced with Ghidra against the decompiled
+  retail `si::` library: every SI transfer — `SIGetType` included — is
+  gated behind a single **global** "transfer busy" flag at `0x80331538`
+  (`si::__SITransfer`, `0x801f48ec`); if it isn't `-1`, the call silently
+  no-ops. The only code that ever clears it is `si::CompleteTransfer`
+  (`0x801f4964`), reachable exclusively from `si::SIInterruptHandler`'s
+  branch gated on *both* SICOMCSR TC-complete bits (`0xc0000000`) being set
+  together. A GameCube pad unplugged mid-transfer signals an SI error
+  (`NOREP` in SISR) instead of a clean completion, so that gate never
+  opens — the flag stays wedged on the dead channel, and every future
+  `SIGetType` call for *all four* channels, not just the disconnected one,
+  silently no-ops forever. An exhaustive cross-reference search over the
+  whole binary confirms nothing outside `si::` itself ever touches
+  `0x80331538`, and nothing inside it times out — this is a real gap in
+  the retail code, not a misunderstanding of some existing recovery path.
+  A soft reset should reload `.bss`/`.data` from the DOL and clear this
+  fine on its own, for what it's worth, so it likely isn't the true
+  culprit for the "doesn't recover on Reset" half of this bug either — but
+  that part remains unconfirmed.
+
+  The poller (`src/poller_autopoll.s`) now watches the flag itself: if it
+  reads non-idle for ~1 real second (240 checks at 4 channel-calls/frame,
+  60fps — far beyond any legitimate transfer's duration, so this can't
+  misfire against a merely slow one), it force-clears `0x80331538` and
+  resets `SICOMCSR` to `0x80000000`, the exact idle value `si::SIInit`
+  itself writes at boot, bypassing the game's own timeout-less completion
+  path entirely. The counter lives at channel 0's KPAD `+0x100` (global
+  state, parked in channel 0's struct for a fixed address; confirmed clear
+  of the existing drum-timer scratch at `+0x108`/`+0x10c`, see
+  `codeB_cc.s`). Needs an actual hot-plug test on hardware next.
 - **A Classic Controller's left shoulder and IR-pointer stick stop working
   after a GameCube-controller hot-plug failure** — *still open, likely
   downstream of the hot-plug bug above.* Reported specifically after a GC
