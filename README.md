@@ -408,8 +408,51 @@ locals. Skipping that corrupts the caller's frame and crashes.
   non-idle for ~1 real second, it force-clears `0x80331538` and resets
   `SICOMCSR` to `0x80000000`, the exact idle value `si::SIInit` writes at
   boot. Needs a real hot-plug test on hardware next — this is the specific
-  bug this watchdog is meant to fix, and it has not yet been tested against
-  an actual unplug/replug cycle.
+  bug this watchdog is meant to fix.
+
+  **Live debugging session (2026-09-14), via USB Gecko:** confirmed the
+  busy-flag mechanism against the real decompiled retail code (not just
+  static analysis): `si::SIInterruptHandler` really does gate
+  `CompleteTransfer()` behind both SICOMCSR TC-complete bits, exactly as
+  described above. Also found a second piece of state the watchdog doesn't
+  touch: `SIGetType` stamps the per-channel cached type slot at
+  `0x80331550 + channel*4` with a pending sentinel (`0x80`) when it starts
+  a transfer; that only gets resolved by `si::GetTypeCallback`, which is
+  itself only reachable through the same interrupt gate the watchdog is
+  working around. In practice this isn't a dead end — `GetTypeCallback`
+  updates the cached type from whatever response comes back, success *or*
+  error — but it means recovery depends on a fresh transfer actually
+  completing after the watchdog unwedges the busy flag, not just the flag
+  itself being cleared.
+
+  **This could not be tested against a real unplug/replug this session.**
+  Every USB Gecko hook type available in the client tool used (WPAD,
+  joypad/GCNPad, and VBI) blackscreens or freezes this patched build,
+  almost certainly because each one patches a fixed address expecting the
+  original untouched retail instruction — and our own controller-support
+  code has already replaced several of those exact addresses (`KPADiRead`
+  itself, at minimum) with branches into our injected hooks. A vanilla
+  (unpatched) disc connects fine with the VBI hook, confirming the
+  incompatibility is specific to our patch, not the console or the tool.
+  Vanilla is otherwise useless for testing this bug: the retail game only
+  calls `SIGetType` once at boot and never again, so its cached type never
+  changes on unplug regardless of what actually happens at the SI level —
+  only our patch's poller re-polls every frame, and that's exactly the
+  build we can't currently attach a debugger to.
+
+  **Next step for whoever picks this up:** the patch itself needs to grow
+  a debugger-compatible hook point of its own — a small, deliberately inert
+  landing spot (not colliding with any of the six existing hooks) that a
+  generic Gecko client's fixed-address patcher can safely land on without
+  corrupting anything. Once that exists, redo this session's plan: watch
+  `0x80331538`, `0x80331550`–`0x8033155c` (per-channel cached type),
+  `0xcd006434`/`0xcd006438` (SICOMCSR/SISR), and `0x803845b0` (channel 0's
+  queued-transfer slot) across a live unplug/replug. A working polling
+  script for this already exists (`gecko_watch.py`, written this session,
+  not yet checked into this repo) — keep individual reads sparse and slow
+  (this session's tighter polling loop appeared to freeze the game by
+  monopolizing the hook's execution window) and confirm the game keeps
+  running between reads before trusting the results.
 
 Older findings, in rough priority order:
 
