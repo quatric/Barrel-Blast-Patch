@@ -427,32 +427,70 @@ locals. Skipping that corrupts the caller's frame and crashes.
 
   **This could not be tested against a real unplug/replug this session.**
   Every USB Gecko hook type available in the client tool used (WPAD,
-  joypad/GCNPad, and VBI) blackscreens or freezes this patched build,
-  almost certainly because each one patches a fixed address expecting the
-  original untouched retail instruction — and our own controller-support
-  code has already replaced several of those exact addresses (`KPADiRead`
-  itself, at minimum) with branches into our injected hooks. A vanilla
-  (unpatched) disc connects fine with the VBI hook, confirming the
-  incompatibility is specific to our patch, not the console or the tool.
-  Vanilla is otherwise useless for testing this bug: the retail game only
-  calls `SIGetType` once at boot and never again, so its cached type never
-  changes on unplug regardless of what actually happens at the SI level —
-  only our patch's poller re-polls every frame, and that's exactly the
-  build we can't currently attach a debugger to.
+  joypad/GCNPad, and VBI) blackscreens or freezes any patched build. A
+  vanilla (unpatched) disc connects fine with the VBI hook, confirming the
+  incompatibility is specific to something about our patch, not the console
+  or the tool. Vanilla is otherwise useless for testing this bug: the
+  retail game only calls `SIGetType` once at boot and never again, so its
+  cached type never changes on unplug regardless of what actually happens
+  at the SI level — only our patch's poller re-polls every frame, and
+  that's exactly the build we can't currently attach a debugger to.
 
-  **Next step for whoever picks this up:** the patch itself needs to grow
-  a debugger-compatible hook point of its own — a small, deliberately inert
-  landing spot (not colliding with any of the six existing hooks) that a
-  generic Gecko client's fixed-address patcher can safely land on without
-  corrupting anything. Once that exists, redo this session's plan: watch
-  `0x80331538`, `0x80331550`–`0x8033155c` (per-channel cached type),
-  `0xcd006434`/`0xcd006438` (SICOMCSR/SISR), and `0x803845b0` (channel 0's
-  queued-transfer slot) across a live unplug/replug. A working polling
-  script for this already exists (`gecko_watch.py`, written this session,
-  not yet checked into this repo) — keep individual reads sparse and slow
-  (this session's tighter polling loop appeared to freeze the game by
-  monopolizing the hook's execution window) and confirm the game keeps
-  running between reads before trusting the results.
+  **2026-09-14 elimination session:** tried to isolate exactly what about
+  the patch triggers this by building a series of test discs against a
+  clean retail DOL, each with only the SI poller hook (`0x80247ADC`)
+  present — none of the other five controller hooks, no Nunchuk-check
+  relaxation — and testing each against a live VBI hook:
+  - Full watchdog-equipped poller body alone: **still freezes.**
+  - Same, with the watchdog block removed entirely (just the per-frame
+    `SIGetType` call + four-channel `SIPOLL`/`OUTBUF` writes + error-ack,
+    no `OSDisableInterrupts`/`OSRestoreInterrupts`, no force-clear):
+    **still freezes.**
+  - Stripped further to the original single-channel body (`b2ef9a1`,
+    just `SIC0OUTBUF`/`SIPOLL` writes — no `SIGetType` call, no error-ack,
+    no watchdog at all): **still freezes.**
+  - Same minimal body, but with its appended code relocated from
+    `TEXT_ADDRESS = 0x80001800` (the low-memory slot every hook type we
+    tried appears to use for its own installed stub) to
+    `0x803EDBE0` — immediately past this DOL's own BSS end
+    (`0x80348C80 + 0xA4D48`), i.e. genuinely unclaimed memory outside the
+    known hook-installer region: **still freezes.**
+
+  So it isn't the watchdog, isn't `SIGetType`, isn't the error-ack, isn't
+  the four-channel vs. single-channel poll width, and isn't (at least not
+  only) the appended-code address colliding with the hook installer's own
+  landing spot. The one variable held constant across every one of these
+  builds is the branch instruction planted at `0x80247ADC` itself, inside
+  `KPADiRead`'s normal per-frame path — merely having *any* code execute
+  from that hook site, no matter how small or where its body lives, is
+  the common factor every failing build shares, and the one thing the
+  passing vanilla build doesn't have. Why that specifically breaks VBI
+  (and WPAD/GCNPad) polling is still unknown — plausibly the Gecko
+  client validates or checksums code/signatures near that call site
+  before trusting the hook it's about to install, and a modified branch
+  there fails that check in a way that hangs rather than errors cleanly,
+  but this is unconfirmed.
+
+  **Next step for whoever picks this up:** test whether a **no-op** hook
+  at `0x80247ADC` — a branch straight back to the original instruction,
+  doing nothing else at all — still freezes the debugger. If it does, the
+  incompatibility is with patching that address at all, not with anything
+  our code does there, and the fix is to find a different, unpatched hook
+  site for the SI poller (or accept that live debugging against a patched
+  build isn't possible with this tool and this hook site, and either find
+  a Gecko client that doesn't validate/checksum around it, or debug via a
+  from-scratch homebrew loader instead of Gecko OS-style hooking). If a
+  no-op hook does *not* freeze, the trigger is something in the poller
+  body itself that even the single-channel form still contains (the
+  `stwu`/`mflr`/register-save prologue shared by all three variants tried
+  is the next thing to strip and test). A working polling script for
+  watching `0x80331538`, `0x80331550`–`0x8033155c` (per-channel cached
+  type), `0xcd006434`/`0xcd006438` (SICOMCSR/SISR), and `0x803845b0`
+  (channel 0's queued-transfer slot) already exists at
+  `tools/gecko_watch.py` — keep individual reads sparse and slow (a tight
+  polling loop appeared to freeze the game outright by monopolizing the
+  hook's execution window) and confirm the game keeps running between
+  reads before trusting the results.
 
 Older findings, in rough priority order:
 
