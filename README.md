@@ -382,21 +382,34 @@ locals. Skipping that corrupts the caller's frame and crashes.
 
 ## Known issues
 
-- **GameCube controller not detected at all with the `d597681` watchdog
-  build** — *reverted to the last poller confirmed working by the user on
-  hardware.* The pad was reported working through the 2026-09-01 session
-  that fixed the second-Wii-Remote crash (`8c982d6`) — i.e. the
-  four-channel, error-acknowledging poller from `eb5ec35`/`ad51366` was
-  fine. Only `d597681`'s hot-plug watchdog (added 2026-09-13, never itself
-  confirmed on hardware) broke detection. `codes/RDKE01.ini`'s poller entry
-  (`C2247ADC`), `src/poller_autopoll.s`, and `tools/build.py`'s
-  `POLLER_AUTOPOLL` have all been reverted word-for-word to the `3aa21e6`
-  body (four-channel `SIPOLL`/`SIC{0-3}OUTBUF`, error-nibble ack, no
-  watchdog) — verified byte-for-byte via `inject_dol.py` against a clean
-  retail DOL. The watchdog logic still exists in git history
-  (`d597681`) if someone wants to revisit the hot-plug-recovery bug later,
-  ideally with a way to test the wedge hypothesis in isolation before
-  shipping it again. Needs a hardware test to confirm the revert.
+- **A GameCube controller stops registering after unplugging/replugging, and
+  does not recover on a soft Reset** — *watchdog reinstated, actively being
+  tested.* A build without the `d597681` watchdog briefly appeared to have
+  broken GC detection entirely, but that turned out to be unrelated: it was
+  a stale controller/SI state on the test console that a full power cycle
+  cleared, not something introduced by any of these builds. The watchdog
+  was reverted, then reinstated word-for-word (`codes/RDKE01.ini`'s
+  `C2247ADC` entry, `src/poller_autopoll.s`, `tools/build.py`'s
+  `POLLER_AUTOPOLL`), verified byte-for-byte via `inject_dol.py` against a
+  clean retail DOL. Traced with Ghidra against the decompiled retail `si::`
+  library: every SI transfer — `SIGetType` included — is gated behind a
+  single **global** "transfer busy" flag at `0x80331538`
+  (`si::__SITransfer`, `0x801f48ec`); if it isn't `-1`, the call silently
+  no-ops. The only code that ever clears it is `si::CompleteTransfer`
+  (`0x801f4964`), reachable exclusively from `si::SIInterruptHandler`'s
+  branch gated on *both* SICOMCSR TC-complete bits (`0xc0000000`) being set
+  together. A GameCube pad unplugged mid-transfer signals an SI error
+  (`NOREP` in SISR) instead of a clean completion, so that gate never
+  opens — the flag stays wedged on the dead channel, and every future
+  `SIGetType` call for *all four* channels, not just the disconnected one,
+  silently no-ops forever until something clears it (which is consistent
+  with the state the test console was actually found in — stuck until a
+  full reboot). The poller now watches the flag itself: if it reads
+  non-idle for ~1 real second, it force-clears `0x80331538` and resets
+  `SICOMCSR` to `0x80000000`, the exact idle value `si::SIInit` writes at
+  boot. Needs a real hot-plug test on hardware next — this is the specific
+  bug this watchdog is meant to fix, and it has not yet been tested against
+  an actual unplug/replug cycle.
 
 Older findings, in rough priority order:
 

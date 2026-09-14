@@ -45,12 +45,12 @@ POLLER_BODY_RAM = 0x800022b8  # where the poller's C2 body lives in this DOL
 
 # assembled from src/poller_autopoll.s -- keep the two in step
 #
-# The hot-plug watchdog for si::'s single global transfer-busy flag
-# (0x80331538) was tried here and reverted: it was never confirmed on
-# hardware, and the multi-channel/error-ack body below (added the same day
-# as the CNunchakaCheck fix, 2026-09-01) is the last version actually
-# confirmed to detect a GameCube pad on a real console. See git history
-# (commit d597681) if the watchdog needs revisiting.
+# Includes the hot-plug watchdog for si::'s single global transfer-busy flag
+# (0x80331538). This was briefly reverted after a GC-detection regression,
+# but that turned out to be a stale-controller-state issue on the test
+# console (cleared by a reboot), not caused by the watchdog. Still not
+# independently confirmed on hardware as the fix for hot-plug recovery --
+# that's the open question being tested now.
 POLLER_AUTOPOLL = [
     0x9421FFE0, 0x9001001C, 0x90610018, 0x90810014, 0x7C0802A6, 0x9001000C,
     0x3D80801F, 0x618C4FA0, 0x7D8903A6, 0x4E800421, 0x8001000C, 0x7C0803A6,
@@ -58,6 +58,15 @@ POLLER_AUTOPOLL = [
     0x90836438, 0x3C000040, 0x60000300, 0x90036400, 0x9003640C, 0x90036418,
     0x90036424, 0x80036430, 0x7004FF00, 0x40820008, 0x60000100, 0x600000FF,
     0x90036430,
+    # hot-plug watchdog for si::'s single global transfer-busy flag -- see
+    # src/poller_autopoll.s for the full writeup
+    0x3CA08033, 0x60A51538, 0x80C50000, 0x3CE0803C, 0x60E79100,
+    0x2C06FFFF, 0x4082000C, 0x39000000, 0x4800006C, 0x81070000, 0x39080001,
+    0x2C0800F0, 0x4180005C, 0x7D2802A6, 0x91210010, 0x3D80801C, 0x618C3A40,
+    0x7D8903A6, 0x4E800421, 0x7C691B78, 0x3CA08033, 0x60A51538, 0x38C0FFFF,
+    0x90C50000, 0x3CC0CD00, 0x3C008000, 0x90066434, 0x7D234B78, 0x3D80801C,
+    0x618C3A68, 0x7D8903A6, 0x4E800421, 0x81210010, 0x7D2803A6, 0x39000000,
+    0x91070000,
     0x8001001C, 0x80610018, 0x80810014, 0x38210020, 0x60000000, 0x9421FF40,
 ]
 
