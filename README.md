@@ -382,7 +382,27 @@ locals. Skipping that corrupts the caller's frame and crashes.
 
 ## Known issues
 
-Found on hardware, in rough priority order:
+- **GameCube controller not detected at all with the current auto-poll
+  body** — *reverted to the last hardware-confirmed poller.* The
+  `eb5ec35`/`ad51366`/`d597681` sequence expanded the poller from
+  channel-0-only to all four SI channels, added error-nibble
+  acknowledgement, and added the hot-plug watchdog — none of which was ever
+  actually run on a console; only the original single-channel body from
+  `b2ef9a1` (2026-08-09) has real hardware confirmation. Reported as a full
+  regression (no GC pad detected at all) on both the 2026-09-01 build and a
+  2026-09-14 build, i.e. every build produced since the Sept 1 rewrite.
+  `codes/RDKE01.ini`'s poller entry (`C2247ADC`) has been reverted word-for-
+  word to the confirmed `b2ef9a1` body — `SIC0OUTBUF`/channel-0-only
+  `SIPOLL` (`0x88`), no multi-channel poll, no error-ack, no watchdog —
+  verified byte-for-byte via `inject_dol.py` against a clean retail DOL.
+  **This trades away four-player routing, hot-plug recovery, and the SI
+  transfer-busy watchdog** (all still present in git history if someone
+  wants to debug them against real hardware) in exchange for restoring the
+  one path actually confirmed to work. Needs a hardware test to confirm the
+  revert; if it still doesn't detect a pad, the bug is elsewhere (`codeA`-
+  `codeD` or the `CNunchakaCheck` relaxation), not the poller.
+
+Older findings, in rough priority order:
 
 - **A second Wii Remote crashes or blackscreens the game** — *fixed,
   confirmed on hardware.* The `ad51366` fix relaxed `CNunchakaCheck`'s two
