@@ -42,6 +42,9 @@ TEXT_LIMIT = 0x80003000
 # the menu is open. The vtable word is checked first so a different heap
 # layout just means the gate never triggers.
 HBM_GATED = (0x80248090, 0x80246588, 0x8024791C, 0x80247500, 0x80247BE0, 0x80247FA8)
+# Buttons and pointer keep running for a Classic Controller channel (r31 is
+# the KPAD base at both hook sites), so it can drive the HOME Menu.
+HBM_CC_PASS = (0x80248090, 0x80247500)
 HBM_OBJECT = 0x80531B80
 HBM_VTABLE = 0x802E7288
 HBM_OPEN_FLAG = HBM_OBJECT + 0x32
@@ -89,12 +92,15 @@ def branch(src, dst):
     return 0x48000000 | (off & 0x03FFFFFC)
 
 
-def hbm_gate(location, body_location, hook, preimage):
+def hbm_gate(location, body_location, hook, preimage, cc_ok=False):
     """Stub: if the HOME Menu is open, run the original instruction and
-    return to the game; otherwise fall through to the hook body."""
+    return to the game; otherwise fall through to the hook body. With
+    cc_ok (hooks where r31 is the KPAD channel base), a channel whose
+    extension is a Classic Controller keeps its hook even in the HOME Menu,
+    so a Classic Controller can drive the menu's pointer and buttons."""
     hi = lambda v: ((v >> 16) + (1 if v & 0x8000 else 0)) & 0xFFFF
     lo = lambda v: v & 0xFFFF
-    words = [
+    head = [
         0x9421FFF0,                                   # stwu  r1,-0x10(r1)
         0x91610008,                                   # stw   r11,8(r1)
         0x9181000C,                                   # stw   r12,0xc(r1)
@@ -105,30 +111,47 @@ def hbm_gate(location, body_location, hook, preimage):
         0x3D600000 | (HBM_VTABLE >> 16),              # lis   r11,vt@h
         0x616B0000 | (HBM_VTABLE & 0xFFFF),           # ori   r11,r11,vt@l
         0x7C0C5800,                                   # cmpw  r12,r11
-        0x40820014,                                   # bne   +0x14 -> run
+        'bne run',
         0x3D600000 | hi(HBM_OPEN_FLAG),               # lis   r11,flag@ha
         0x898B0000 | lo(HBM_OPEN_FLAG),               # lbz   r12,flag@l(r11)
         0x2C0C0000,                                   # cmpwi r12,0
-        0x4082001C,                                   # bne   +0x1c -> skip
-        # run:
-        0x81810004,                                   # lwz   r12,4(r1)
-        0x7D8FF120,                                   # mtcr  r12
-        0x81610008,                                   # lwz   r11,8(r1)
-        0x8181000C,                                   # lwz   r12,0xc(r1)
-        0x38210010,                                   # addi  r1,r1,0x10
-        0,                                            # b body
-        # skip:
-        0x81810004,                                   # lwz   r12,4(r1)
-        0x7D8FF120,                                   # mtcr  r12
-        0x81610008,                                   # lwz   r11,8(r1)
-        0x8181000C,                                   # lwz   r12,0xc(r1)
-        0x38210010,                                   # addi  r1,r1,0x10
-        preimage,                                     # original instruction
-        0,                                            # b hook+4
+        'beq run',
     ]
-    words[20] = branch(location + 20 * 4, body_location)
-    words[27] = branch(location + 27 * 4, hook + 4)
-    return words
+    if cc_ok:
+        head += [
+            0x899F005C,                               # lbz   r12,0x5c(r31)
+            0x2C0C0002,                               # cmpwi r12,2 (Classic)
+            'beq run',
+        ]
+    head += ['b skip']
+    restore = [
+        0x81810004,                                   # lwz   r12,4(r1)
+        0x7D8FF120,                                   # mtcr  r12
+        0x81610008,                                   # lwz   r11,8(r1)
+        0x8181000C,                                   # lwz   r12,0xc(r1)
+        0x38210010,                                   # addi  r1,r1,0x10
+    ]
+    words = head + ['run:'] + restore + ['b body'] + ['skip:'] + restore + [preimage, 'b back']
+    labels, out = {}, []
+    for w in words:
+        if isinstance(w, str) and w.endswith(':'):
+            labels[w[:-1]] = len(out)
+        else:
+            out.append(w)
+    for i, w in enumerate(out):
+        if not isinstance(w, str):
+            continue
+        op, target = w.split()
+        pc = location + i * 4
+        if target == 'body':
+            out[i] = branch(pc, body_location)
+        elif target == 'back':
+            out[i] = branch(pc, hook + 4)
+        else:
+            off = (labels[target] - i) * 4
+            base = {'b': 0x48000000, 'beq': 0x41820000, 'bne': 0x40820000}[op]
+            out[i] = base | (off & (0x03FFFFFC if op == 'b' else 0xFFFC))
+    return out
 
 
 LOG_HOOK = 0x80247ADC      # the logger stub runs first at KPADRead's entry
@@ -317,10 +340,11 @@ def inject(src, dst, log=False, log_only=False):
             log_patch = (len(blob) // 4 + bl_idx, log_entry)
             blob.extend(struct.pack('>%dI' % len(stub), *stub))
         if hook in HBM_GATED:
-            gate_len = 28 * 4
+            cc_ok = hook in HBM_CC_PASS
+            gate_len = len(hbm_gate(entry, entry, hook, HOOK_PREIMAGE[hook], cc_ok)) * 4
             body_location = entry + gate_len
-            blob.extend(struct.pack('>28I', *hbm_gate(entry, body_location, hook,
-                                                      HOOK_PREIMAGE[hook])))
+            gate = hbm_gate(entry, body_location, hook, HOOK_PREIMAGE[hook], cc_ok)
+            blob.extend(struct.pack('>%dI' % len(gate), *gate))
         location = TEXT_ADDRESS + len(blob)
         words = list(bodies[hook])
         if words[-2] != HOOK_PREIMAGE[hook]:
