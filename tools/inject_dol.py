@@ -25,6 +25,7 @@ TEXT_ADDRESS = 0x80001820
 #   +0x00..+0x0F  SI poller: per-channel last-probe time base
 #   +0x10         gecko_log.c: last log line time base
 #   +0x14..+0x17  SI poller: per-channel consecutive-NOREP counters
+#   +0x18..+0x1B  codeE: per-channel "last KPAD sample was synthesised" flag
 SCRATCH_BYTES = 0x20
 # The section must end before the OS's low-memory globals at 0x80003000
 # (IPC, boot info, reset state); running into them blackscreens at boot.

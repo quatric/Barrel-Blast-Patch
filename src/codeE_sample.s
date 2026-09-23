@@ -43,16 +43,30 @@
     stw     6, 0x10(1)
     stw     7, 0x0c(1)
 
+    cmplwi  27, 3
+    bgt     out                 # channel out of range
+
+    # r7 = this channel's "last sample was ours" flag, in the injected
+    # section's scratch bytes (+0x18..+0x1B).
+    lis     7, 0x8000
+    ori     7, 7, 0x1838
+    add     7, 7, 27
+
     lbz     3, 0x5c(31)         # KPAD dev_type: 0 = bare Wii Remote,
     cmpwi   3, 0                # 0xFD = no Wii Remote on this channel
-    beq     dev_ok
-    cmpwi   3, 0xFD             # (seen on hardware: a GameCube pad on a
-    bne     done                # remote-less channel was ignored because
-dev_ok:                         # only 0 was accepted); never touch
-                                # Classic/Nunchuk/Bongo state
-
-    cmpwi   27, 4
-    bge     done                # channel out of range
+    beq     dev_ok              # (seen on hardware: a GameCube pad on a
+    cmpwi   3, 0xFD             # remote-less channel was ignored because
+    beq     dev_ok              # only 0 was accepted)
+    # 1 (Nunchuk) is fine only when it's our own synthesised sample from
+    # the last read showing through: otherwise dev_type alternated 1/0
+    # every read and the game flickered between "Attach the Nunchuk" and
+    # OK. A real Classic/Nunchuk/Bongo extension is never touched.
+    cmpwi   3, 1
+    bne     done
+    lbz     3, 0(7)
+    cmpwi   3, 0
+    beq     done
+dev_ok:
 
     lis     4, 0xCD00
     mulli   5, 27, 12           # SI channel register stride
@@ -90,26 +104,29 @@ zero_loop:
     stb     4, 0x10e(31)        # advance write index (wraps on next read)
     li      6, 1
     stb     6, 0x10f(31)        # publish one sample
-    b       done
+    stb     6, 0(7)             # remember it was ours
+    b       out
 
     # Real samples queued with no extension: mark the newest `count` entries,
     # ring[(write_index - k) & 0xF] for k = 1..count.
 patch_real:
+    li      6, 0
+    stb     6, 0(7)             # real samples: dev_type is the remote's own
     cmplwi  3, 0x10
     ble     count_ok
     li      3, 0x10
 count_ok:
-    subf    7, 3, 4             # oldest queued = write_index - count
+    subf    3, 3, 4             # oldest queued = write_index - count
 patch_loop:
-    andi.   5, 7, 0xF
+    andi.   5, 3, 0xF
     mulli   5, 5, 0x38
     add     5, 31, 5
     addi    5, 5, 0x110
     bl      mark
-    addi    7, 7, 1
-    cmpw    7, 4
+    addi    3, 3, 1
+    cmpw    3, 4
     blt     patch_loop
-    b       done
+    b       out
 
     # r5 = sample. Clobbers r6 only.
 mark:
@@ -122,6 +139,9 @@ mark:
     blr
 
 done:
+    li      3, 0
+    stb     3, 0(7)             # not synthesising on this channel
+out:
     lwz     3, 0x1c(1)
     lwz     4, 0x18(1)
     lwz     5, 0x14(1)
