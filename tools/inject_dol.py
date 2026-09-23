@@ -19,6 +19,19 @@ INI = os.path.join(HERE, '..', 'codes', 'RDKE01.ini')
 # the game into a black screen. Every other word of the section survives, so
 # starting 32 bytes in keeps the whole injected section clear of it.
 TEXT_ADDRESS = 0x80001820
+# The first SCRATCH_BYTES of the section are zeroed data, not code: the SI
+# poller keeps per-channel "pending since" time-base stamps there.
+SCRATCH_BYTES = 0x20
+
+# Hooks that stand down while the HOME Menu is open, so only the Wii Remote
+# drives it: buttons and the IR pointer. CHomeButtonMenu is a singleton
+# allocated once at boot at a fixed heap address; its byte +0x32 is 1 while
+# the menu is open. The vtable word is checked first so a different heap
+# layout just means the gate never triggers.
+HBM_GATED = (0x80248090, 0x80247500)
+HBM_OBJECT = 0x80531B80
+HBM_VTABLE = 0x802E7288
+HBM_OPEN_FLAG = HBM_OBJECT + 0x32
 
 HOOK_ORDER = [
     0x80247ADC,  # SI poller
@@ -27,6 +40,7 @@ HOOK_ORDER = [
     0x8024791C,  # stick
     0x80247500,  # IR pointer
     0x80247BE0,  # synthetic KPAD sample
+    0x80247FA8,  # neutralize Wii Remote motion while a pad/CC is active
 ]
 HOOK_PREIMAGE = {
     0x80247ADC: 0x9421FF40,
@@ -35,6 +49,7 @@ HOOK_PREIMAGE = {
     0x8024791C: 0x7FC3F378,
     0x80247500: 0x83E1001C,
     0x80247BE0: 0x881F010F,
+    0x80247FA8: 0x1C1E0084,
 }
 NUNCHUK_CHECK_COMPARES = {
     # CNunchakaCheck::update runs `cmplwi r0,1; bne <fail>` per connected
@@ -59,6 +74,48 @@ def branch(src, dst):
     if off & 3 or not -0x2000000 <= off < 0x2000000:
         raise ValueError(f'branch 0x{src:08X} -> 0x{dst:08X} is out of range/alignment')
     return 0x48000000 | (off & 0x03FFFFFC)
+
+
+def hbm_gate(location, body_location, hook, preimage):
+    """Stub: if the HOME Menu is open, run the original instruction and
+    return to the game; otherwise fall through to the hook body."""
+    hi = lambda v: ((v >> 16) + (1 if v & 0x8000 else 0)) & 0xFFFF
+    lo = lambda v: v & 0xFFFF
+    words = [
+        0x9421FFF0,                                   # stwu  r1,-0x10(r1)
+        0x91610008,                                   # stw   r11,8(r1)
+        0x9181000C,                                   # stw   r12,0xc(r1)
+        0x7D800026,                                   # mfcr  r12
+        0x91810004,                                   # stw   r12,4(r1)
+        0x3D600000 | hi(HBM_OBJECT),                  # lis   r11,obj@ha
+        0x818B0000 | lo(HBM_OBJECT),                  # lwz   r12,obj@l(r11)
+        0x3D600000 | (HBM_VTABLE >> 16),              # lis   r11,vt@h
+        0x616B0000 | (HBM_VTABLE & 0xFFFF),           # ori   r11,r11,vt@l
+        0x7C0C5800,                                   # cmpw  r12,r11
+        0x40820014,                                   # bne   +0x14 -> run
+        0x3D600000 | hi(HBM_OPEN_FLAG),               # lis   r11,flag@ha
+        0x898B0000 | lo(HBM_OPEN_FLAG),               # lbz   r12,flag@l(r11)
+        0x2C0C0000,                                   # cmpwi r12,0
+        0x4082001C,                                   # bne   +0x1c -> skip
+        # run:
+        0x81810004,                                   # lwz   r12,4(r1)
+        0x7D8FF120,                                   # mtcr  r12
+        0x81610008,                                   # lwz   r11,8(r1)
+        0x8181000C,                                   # lwz   r12,0xc(r1)
+        0x38210010,                                   # addi  r1,r1,0x10
+        0,                                            # b body
+        # skip:
+        0x81810004,                                   # lwz   r12,4(r1)
+        0x7D8FF120,                                   # mtcr  r12
+        0x81610008,                                   # lwz   r11,8(r1)
+        0x8181000C,                                   # lwz   r12,0xc(r1)
+        0x38210010,                                   # addi  r1,r1,0x10
+        preimage,                                     # original instruction
+        0,                                            # b hook+4
+    ]
+    words[20] = branch(location + 20 * 4, body_location)
+    words[27] = branch(location + 27 * 4, hook + 4)
+    return words
 
 
 def parse_gecko_ini(path=INI):
@@ -158,18 +215,24 @@ def inject(src, dst):
                 f'found 0x{got:08X}')
         d.write(address, struct.pack('>I', expected & 0xFFFF0000))
 
-    blob = bytearray()
+    blob = bytearray(SCRATCH_BYTES)
     locations = {}
     for hook in HOOK_ORDER:
         while len(blob) & 0x1F:
             blob.extend(struct.pack('>I', 0x60000000))
+        entry = TEXT_ADDRESS + len(blob)
+        if hook in HBM_GATED:
+            gate_len = 28 * 4
+            body_location = entry + gate_len
+            blob.extend(struct.pack('>28I', *hbm_gate(entry, body_location, hook,
+                                                      HOOK_PREIMAGE[hook])))
         location = TEXT_ADDRESS + len(blob)
         words = list(bodies[hook])
         if words[-2] != HOOK_PREIMAGE[hook]:
             raise AssertionError(
                 f'C2 {hook:#x} does not end with its reproduced hook instruction')
         words[-1] = branch(location + (len(words) - 1) * 4, hook + 4)
-        locations[hook] = location
+        locations[hook] = entry
         blob.extend(struct.pack('>%dI' % len(words), *words))
 
     section = d.add_text_section(TEXT_ADDRESS, blob)

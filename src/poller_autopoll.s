@@ -27,6 +27,54 @@
     bctrl
     lwz     0, 0x0c(1)
     mtlr    0
+    # Un-stick a probe that can never finish. SIGetType parks the cached
+    # type at 0x80 ("pending") while its type transfer is outstanding, and
+    # only that transfer's callback replaces it. After a soft reset the
+    # cache can come up pending with no transfer in flight at all (busy
+    # flag idle) -- seen in Dolphin right after a HOME Menu Reset -- and
+    # then it stays pending forever: the channel is never polled again,
+    # the hooks keep reading the stale pre-reset input buffer (a pointer
+    # that drifts on its own, Wii Remote input overridden), and only
+    # unplugging the pad recovers. If this channel has been pending with
+    # the SI idle for over a second, mark it "no response" (8) so the next
+    # SIGetType probes it again. Per-channel time-base stamps live in the
+    # scratch words inject_dol.py reserves at the start of the injected
+    # section (0x80001820), 0 = not pending.
+    lwz     3, 0x18(1)          # channel
+    cmplwi  3, 3
+    bgt     pend_done
+    lis     6, 0x8033
+    ori     6, 6, 0x1550        # si:: cached type per channel
+    slwi    7, 3, 2
+    lwzx    8, 6, 7
+    lis     9, 0x8000
+    ori     9, 9, 0x1820        # pending-since stamps
+    cmpwi   8, 0x80
+    bne     pend_clear
+    lis     10, 0x8033
+    lwz     10, 0x1538(10)      # si:: transfer-busy flag, -1 = idle
+    cmpwi   10, -1
+    bne     pend_clear          # a transfer is in flight; it will resolve
+    lwzx    10, 9, 7
+    mftb    11
+    cmpwi   10, 0
+    bne     pend_timing
+    ori     11, 11, 1           # first sighting (never store 0)
+    stwx    11, 9, 7
+    b       pend_done
+pend_timing:
+    subf    12, 10, 11
+    lis     0, 0x039F
+    ori     0, 0, 0x8B0         # 60,750,000 ticks = 1 s
+    cmplw   12, 0
+    blt     pend_done
+    li      0, 8
+    stwx    0, 6, 7             # "no response": SIGetType re-probes
+pend_clear:
+    li      0, 0
+    stwx    0, 9, 7
+pend_done:
+
     lwz     3, 0x18(1)          # restore channel argument
     lis     3, 0xCD00
 
@@ -78,29 +126,15 @@ norep_next:
     oris    4, 4, 0x8000
     stw     4, 0x6438(3)
 
-    # Enable polling (and copy-on-vblank) only for channels whose cached
-    # type is a standard GameCube pad ((type & 0x18000000) == 0x08000000,
-    # not the 0x80 pending sentinel). A channel being re-probed is therefore
-    # not polled while its type transfer is in flight -- the SDK likewise
-    # disables polling for a channel before probing it.
-    li      7, 0                # enable mask
-    li      8, 0
-en_loop:
-    slwi    10, 8, 2
-    lwzx    10, 6, 10
-    andi.   11, 10, 0x80
-    bne     en_next             # probe pending
-    rlwinm  11, 10, 0, 3, 4     # & 0x18000000
-    lis     12, 0x0800
-    cmpw    11, 12
-    bne     en_next
-    li      11, 0x88            # EN + VBCPY bits for channel 0
-    srw     11, 11, 8
-    or      7, 7, 11
-en_next:
-    addi    8, 8, 1
-    cmpwi   8, 4
-    blt     en_loop
+    # Poll (and copy-on-vblank) all four channels, all the time. Gating
+    # this on the cached type was tried and backfired: si:: decides whether
+    # a channel is "polled" from its own shadow of SIPOLL, which this game
+    # never sets, so SIGetType re-probes every ~50 ms and flips the cached
+    # type to 0x80 (pending) each time -- which switched polling on and off
+    # continuously, dropping pad input. The hardware runs a type transfer
+    # alongside polling without trouble; polling an empty port just latches
+    # NOREP, which the re-probe logic above wants anyway.
+    li      7, 0xFF             # EN + VBCPY for channels 0-3
 
     lwz     0, 0x6430(3)        # SIPOLL
     rlwinm  0, 0, 0, 0, 23      # clear the enable/VBCPY byte, keep X/Y
