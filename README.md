@@ -492,6 +492,37 @@ locals. Skipping that corrupts the caller's frame and crashes.
   hook's execution window) and confirm the game keeps running between
   reads before trusting the results.
 
+  **2026-09-23 Dolphin session — boot crash found and fixed, watchdog
+  verified.** Any build containing the full SI poller black-screened in
+  Dolphin (vanilla booted fine). The game's own `OSReport` crash dump
+  (Dolphin's log with `OSREPORT` enabled) showed an ISI at `0x30` with a
+  corrupted `r1`/`r2`/LR. Root cause: the first word of the injected text
+  section at `0x80001800` is overwritten at runtime within a few seconds of
+  boot — every other word survives, and a GDB write watchpoint on it never
+  fires, so it isn't an ordinary CPU store. That word was the poller's
+  opening `stwu`, so the poller ran without a stack frame, trashed its
+  caller's frame, and the game later returned into garbage. Bisecting by
+  removing blocks of the poller had appeared to "fix" it only by shifting
+  which word landed at `0x80001800`. `inject_dol.py`'s `TEXT_ADDRESS` is
+  now `0x80001820` and the full six-hook build boots. This is plausibly
+  related to the USB Gecko freeze above — Gecko-style hook installers put
+  their own codehandler at `0x80001800` — but that is untested.
+
+  The same session fixed three poller bugs: `r5` (`KPADRead`'s sample
+  count, read right after the hook) wasn't preserved across `SIGetType`;
+  the watchdog's state lived at `0x803C9100`, which is 0xC0 bytes *before*
+  channel 0's KPAD struct (`0x803C91C0`), not at `+0x100` — now
+  `0x803C92C0`; and its 1-second timeout counted `KPADRead` calls instead
+  of time — it now uses the time base.
+
+  A real unplug/replug in Dolphin (Wii U GC adapter) recovers, but Dolphin
+  never wedges the busy flag in the first place, so that proves little.
+  Forcing the flag to `0` over the GDB stub to simulate the wedge showed
+  the watchdog doing its job: channel 0's cached type went to `0x80`
+  (pending) and stayed there until the watchdog reset the flag to `-1`,
+  after which it re-probed back to `0x09000000` and kept working. **Still
+  needed: the same unplug/replug on real hardware.**
+
 Older findings, in rough priority order:
 
 - **A second Wii Remote crashes or blackscreens the game** — *fixed,
