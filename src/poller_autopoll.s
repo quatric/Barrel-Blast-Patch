@@ -15,6 +15,9 @@
     stw     0, 0x1c(1)
     stw     3, 0x18(1)
     stw     4, 0x14(1)
+    stw     5, 0x08(1)          # KPADRead's sample count (it does `mr r14, r5`
+                                # right after this hook) -- SIGetType is free to
+                                # clobber r5, and a garbage count hangs the game
     mflr    0
     stw     0, 0x0c(1)
 
@@ -72,14 +75,24 @@ ypresent:
     # as the actual cause of the "hot-plug doesn't recover" bug -- it is
     # the leading hypothesis from static analysis of the retail code.
     #
-    # Recovery: if the flag has read non-idle for ~1 real second (4 channel
-    # calls/frame * 60fps), force it back to -1 and reset SICOMCSR to
+    # Recovery: if the flag has read non-idle for ~1 real second, force it
+    # back to -1 and reset SICOMCSR to
     # 0x80000000 -- the exact idle value si::SIInit itself writes at boot --
     # bypassing the game's own (timeout-less) completion path entirely.
     # 1 second is far beyond any legitimate transfer's duration, so this
     # can't misfire against a merely-slow transfer, only a truly hung one.
     #
-    # Counter lives at channel 0's KPAD +0x100. This is global state (the
+    # "1 second" is measured with the time base (mftb, 60.75 MHz on Wii),
+    # not by counting hook calls: KPADRead is not strictly 4 calls/frame --
+    # during boot the game calls it in a tight loop, so a call-count budget
+    # elapsed in microseconds, fired mid-way through a legitimate SIGetType
+    # transfer, killed it before its callback ran, and left every channel's
+    # cached type stuck at the 0x80 pending sentinel -- a black screen at
+    # boot (reproduced in Dolphin; removing any one block of this body hid
+    # it only by changing how long transfers stayed busy).
+    #
+    # The low time-base word at which the flag was first seen busy lives at
+    # channel 0's KPAD +0x100 (0 = not currently busy). This is global state (the
     # busy flag itself is global, not per-channel) parked in channel 0's
     # struct for a fixed, always-valid address; +0x100 is confirmed clear
     # of the existing drum edge-trigger scratch at +0x108/+0x10c (see
@@ -90,16 +103,24 @@ ypresent:
     ori     5, 5, 0x1538
     lwz     6, 0(5)             # si:: global transfer-busy flag; -1 = idle
     lis     7, 0x803C
-    ori     7, 7, 0x9100        # channel-0 KPAD +0x100: watchdog frame counter
+    ori     7, 7, 0x92C0        # channel-0 KPAD (0x803C91C0) +0x100: time base when busy began
     cmpwi   6, -1
     bne     wd_busy
     li      8, 0
     b       wd_store
 wd_busy:
     lwz     8, 0(7)
-    addi    8, 8, 1
-    cmpwi   8, 0xF0             # ~1s at 60fps, 4 channel-calls/frame
-    blt     wd_store
+    mftb    9
+    cmpwi   8, 0
+    bne     wd_timing
+    ori     8, 9, 1             # first busy sighting: stamp it (never store 0)
+    b       wd_store
+wd_timing:
+    subf    10, 8, 9            # ticks busy (unsigned, wrap-safe)
+    lis     11, 0x039F
+    ori     11, 11, 0x8B0       # 60,750,000 ticks = 1 s
+    cmplw   10, 11
+    blt     wd_done
     mflr    9
     stw     9, 0x10(1)
     lis     12, 0x801c
@@ -129,8 +150,6 @@ wd_done:
     lwz     0, 0x1c(1)
     lwz     3, 0x18(1)
     lwz     4, 0x14(1)
+    lwz     5, 0x08(1)
     addi    1, 1, 0x20
-    nop                         # pad -- keeps the reproduced original
-                                # instruction at the required 2nd-to-last
-                                # word slot for a fixed total word count
     stwu    1, -0xc0(1)         # ORIGINAL INSTRUCTION

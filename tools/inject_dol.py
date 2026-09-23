@@ -13,7 +13,12 @@ from dol import Dol
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INI = os.path.join(HERE, '..', 'codes', 'RDKE01.ini')
-TEXT_ADDRESS = 0x80001800
+# Not 0x80001800: the first word there is overwritten at runtime shortly
+# after boot (seen in Dolphin; not a CPU store -- a write watchpoint on it
+# never fires), which replaced the SI poller's opening `stwu` and crashed
+# the game into a black screen. Every other word of the section survives, so
+# starting 32 bytes in keeps the whole injected section clear of it.
+TEXT_ADDRESS = 0x80001820
 
 HOOK_ORDER = [
     0x80247ADC,  # SI poller
