@@ -30,12 +30,17 @@ SCRATCH_BYTES = 0x20
 # (IPC, boot info, reset state); running into them blackscreens at boot.
 TEXT_LIMIT = 0x80003000
 
-# Hooks that stand down while the HOME Menu is open, so only the Wii Remote
-# drives it: buttons and the IR pointer. CHomeButtonMenu is a singleton
+# Hooks that stand down while the HOME Menu is open, so it sees exactly what
+# the real Wii Remote reports: every hook except the SI poller (which has to
+# keep the pad's polling alive). The IR pointer and buttons were the obvious
+# ones; codeE's "Nunchuk-class" marking of queued Wii Remote samples also has
+# to go, or the HOME Menu sees an extension being plugged in and pulled out
+# every read (a flickering pointer and the extension sound, seen on
+# hardware). CHomeButtonMenu is a singleton
 # allocated once at boot at a fixed heap address; its byte +0x32 is 1 while
 # the menu is open. The vtable word is checked first so a different heap
 # layout just means the gate never triggers.
-HBM_GATED = (0x80248090, 0x80247500)
+HBM_GATED = (0x80248090, 0x80246588, 0x8024791C, 0x80247500, 0x80247BE0, 0x80247FA8)
 HBM_OBJECT = 0x80531B80
 HBM_VTABLE = 0x802E7288
 HBM_OPEN_FLAG = HBM_OBJECT + 0x32
