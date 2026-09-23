@@ -8,6 +8,8 @@
  *   T<tb> B<busy> P<si.poll shadow> t<type0>,<type1>,<type2>,<type3>
  *     S<SISR> L<SIPOLL> C<SICOMCSR> I<C0INBUFH>,<C0INBUFL>
  *     H<CHomeButtonMenu vtable word>,<open flag word> X<ch0 pointer x>,<y>
+ *     K<ch0 hold>,<ch0 dev_type/wpad_err/dpd_valid/format>
+ *      <ch1 hold>,<ch1 dev_type/...>  (KPADStatus words +0x00 and +0x5C)
  *
  * Called from a hook stub at KPADRead's entry. Position independent: no
  * globals, only fixed hardware/game addresses; the rate-limit stamp lives
@@ -94,7 +96,15 @@ void gecko_log(void)
     hex(REG(0x803C91C0 + 0x20));        /* KPAD ch0 pointer position */
     put(',');
     hex(REG(0x803C91C0 + 0x24));
-    put('\r');
+    put(' ');
+    put('K');
+    for (i = 0; i < 2; i++) {
+        u32 k = 0x803C91C0 + i * 0x524;
+        hex(REG(k));
+        put(',');
+        hex(REG(k + 0x5C));
+        put(i ? '\r' : ' ');
+    }
     put('\n');
 }
 
