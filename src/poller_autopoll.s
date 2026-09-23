@@ -30,19 +30,31 @@
     lwz     3, 0x18(1)          # restore channel argument
     lis     3, 0xCD00
 
-    # Acknowledge every channel's latched error status (NOREP/COLL/OVRUN/
-    # UNRUN = the low nibble of each channel's SISR byte, write-1-to-clear;
-    # writing 0 to a bit leaves it alone). Without this, unplugging a pad
-    # latches NOREP forever: ERRSTAT stays set in INBUFH, every hook's error
-    # check skips injection, and replugging never recovers until reboot.
-    # Masking to the error nibbles before writing back is the game's own SI
-    # library idiom -- si::SIInterruptHandler does it a channel at a time at
-    # 0x801f4574-0x801f458c (lis 0x0F00; sraw by chan*8; and; store back).
-    lwz     4, 0x6438(3)
-    lis     0, 0x0F0F
-    ori     0, 0, 0x0F0F
-    and     4, 4, 0
-    stw     4, 0x6438(3)
+    # Re-probe after a disconnect. SIGetType only sends a fresh type command
+    # (0x00) when the SDK's cached type for the channel is 8 ("no
+    # response"), and the only thing that sets 8 is the SDK reading NOREP
+    # (0x08 in the channel's SISR byte) -- which this game never does,
+    # because it never uses the PAD library. So copy NOREP into the cache
+    # ourselves, *before* acknowledging it below: the next SIGetType for
+    # that channel then probes it, and a replugged pad gets the 0x00 it
+    # needs instead of being polled with a stale cached type forever.
+    lwz     4, 0x6438(3)        # SISR
+    lis     6, 0x8033
+    ori     6, 6, 0x1550        # si:: cached type per channel (4 words)
+    li      8, 0                # channel
+    li      9, 8                # "no response" type
+norep_loop:
+    slwi    10, 8, 3
+    lis     11, 0x0800          # channel 0's NOREP bit
+    srw     11, 11, 10
+    and.    11, 11, 4
+    beq     norep_next
+    slwi    10, 8, 2
+    stwx    9, 6, 10
+norep_next:
+    addi    8, 8, 1
+    cmpwi   8, 4
+    blt     norep_loop
 
     # Poll command into all four channels' output buffers.
     lis     0, 0x0040
@@ -52,12 +64,51 @@
     stw     0, 0x6418(3)        # SIC2OUTBUF
     stw     0, 0x6424(3)        # SIC3OUTBUF
 
+    # One SISR write both acknowledges every channel's latched error
+    # nibble (NOREP/COLL/OVRUN/UNRUN, write-1-to-clear; the game's own
+    # SIInterruptHandler idiom) and sets WR (bit 31), which is what actually
+    # transfers the SICnOUTBUF values above to the hardware -- the SDK's
+    # SIEnablePolling always writes SISR = 0x80000000 before SIPOLL. Without
+    # it the output buffers were never latched, and pads only worked while
+    # polled with whatever command something else had latched before the
+    # game booted.
+    lis     0, 0x0F0F
+    ori     0, 0, 0x0F0F
+    and     4, 4, 0
+    oris    4, 4, 0x8000
+    stw     4, 0x6438(3)
+
+    # Enable polling (and copy-on-vblank) only for channels whose cached
+    # type is a standard GameCube pad ((type & 0x18000000) == 0x08000000,
+    # not the 0x80 pending sentinel). A channel being re-probed is therefore
+    # not polled while its type transfer is in flight -- the SDK likewise
+    # disables polling for a channel before probing it.
+    li      7, 0                # enable mask
+    li      8, 0
+en_loop:
+    slwi    10, 8, 2
+    lwzx    10, 6, 10
+    andi.   11, 10, 0x80
+    bne     en_next             # probe pending
+    rlwinm  11, 10, 0, 3, 4     # & 0x18000000
+    lis     12, 0x0800
+    cmpw    11, 12
+    bne     en_next
+    li      11, 0x88            # EN + VBCPY bits for channel 0
+    srw     11, 11, 8
+    or      7, 7, 11
+en_next:
+    addi    8, 8, 1
+    cmpwi   8, 4
+    blt     en_loop
+
     lwz     0, 0x6430(3)        # SIPOLL
+    rlwinm  0, 0, 0, 0, 23      # clear the enable/VBCPY byte, keep X/Y
     andi.   4, 0, 0xff00        # Y field already set?
     bne     ypresent
     ori     0, 0, 0x0100        # Y = 1
 ypresent:
-    ori     0, 0, 0x00FF        # enable + copy-on-vblank, all four channels
+    or      0, 0, 7
     stw     0, 0x6430(3)
 
     # Hot-plug watchdog. si::__SITransfer (0x801f48ec) gates every SI
