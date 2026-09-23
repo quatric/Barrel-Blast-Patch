@@ -97,3 +97,42 @@ void gecko_log(void)
     put('\r');
     put('\n');
 }
+
+/* Called from a stub at the entry of the OS's unhandled-exception handler
+ * (__OSUnhandledException, 0x801C0B34) before it prints its register dump
+ * -- which goes nowhere on retail hardware. Sends the essentials over the
+ * Gecko instead:
+ *
+ *   CRASH <type> SRR0 <pc> SRR1 <msr> LR <lr> R1 <sp> DSISR <x> DAR <x>
+ *     BT <saved LR of each stack frame, innermost first>
+ */
+void gecko_crash(u32 type, u32 *ctx, u32 dsisr, u32 dar)
+{
+    u32 sp, i;
+
+    if (exchange(0x90000000) != 0x04700000)
+        return;
+    put('\r'); put('\n');
+    put('C'); put('R'); put('A'); put('S'); put('H'); put(' ');
+    hex(type); put(' ');
+    field('P', ctx[0x198 / 4]);         /* SRR0 */
+    field('M', ctx[0x19c / 4]);         /* SRR1 */
+    field('L', ctx[0x84 / 4]);          /* LR */
+    field('R', ctx[1]);                 /* r1 */
+    field('D', dsisr);
+    field('A', dar);
+    put('B'); put('T');
+    sp = ctx[1];
+    for (i = 0; i < 10; i++) {
+        if (sp < 0x80000000 || sp >= 0x81800000 || (sp & 3))
+            break;
+        put(' ');
+        hex(((u32 *)sp)[1]);            /* LR save word of this frame */
+        sp = ((u32 *)sp)[0];            /* back chain */
+    }
+    put('\r'); put('\n');
+    for (i = 0; i < 32; i++) {          /* all GPRs, 8 per line */
+        hex(ctx[i]);
+        put((i & 7) == 7 ? '\n' : ' ');
+    }
+}

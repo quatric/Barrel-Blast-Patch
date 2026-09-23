@@ -131,6 +131,11 @@ def hbm_gate(location, body_location, hook, preimage):
 
 
 LOG_HOOK = 0x80247ADC      # the logger stub runs first at KPADRead's entry
+# __OSUnhandledException(type, context, dsisr, dar): with --log, a stub here
+# sends the crash essentials over the Gecko before the OS's own dump, which
+# goes nowhere on retail hardware.
+CRASH_HOOK = 0x801C0B34
+CRASH_PREIMAGE = 0x9421FFD0
 DEVKITPPC = os.environ.get('DEVKITPPC', '/opt/devkitpro/devkitPPC') + '/bin/'
 
 
@@ -162,12 +167,14 @@ def build_logger():
                               capture_output=True, text=True, check=True).stdout
         entry = int(next(l.split()[0] for l in syms.splitlines()
                          if l.endswith(' gecko_log')), 16)
+        crash_entry = int(next(l.split()[0] for l in syms.splitlines()
+                               if l.endswith(' gecko_crash')), 16)
         subprocess.run([DEVKITPPC + 'powerpc-eabi-objcopy', '-O', 'binary',
                         '-j', '.text', o, b], check=True)
         logger = _words(b)
     bl = [i for i, w in enumerate(stub) if w == 0x48000001]
     assert len(bl) == 1, 'stub must contain exactly one `bl .` placeholder'
-    return stub, logger, entry, bl[0]
+    return stub, logger, entry, bl[0], crash_entry
 
 
 def parse_gecko_ini(path=INI):
@@ -278,7 +285,7 @@ def inject(src, dst, log=False, log_only=False):
             blob.extend(struct.pack('>I', 0x60000000))
         entry = TEXT_ADDRESS + len(blob)
         if log and hook == LOG_HOOK:
-            stub, logger, log_entry, bl_idx = build_logger()
+            stub, logger, log_entry, bl_idx, crash_entry = build_logger()
             log_patch = (len(blob) // 4 + bl_idx, log_entry)
             blob.extend(struct.pack('>%dI' % len(stub), *stub))
         if hook in HBM_GATED:
@@ -296,6 +303,16 @@ def inject(src, dst, log=False, log_only=False):
         blob.extend(struct.pack('>%dI' % len(words), *words))
 
     if log:
+        got = struct.unpack('>I', d.read(CRASH_HOOK, 4))[0]
+        if got != CRASH_PREIMAGE:
+            raise AssertionError(f'crash hook 0x{CRASH_HOOK:08X}: found 0x{got:08X}')
+        while len(blob) & 0x1F:
+            blob.extend(struct.pack('>I', 0x60000000))
+        crash_at = TEXT_ADDRESS + len(blob)
+        words = stub + [CRASH_PREIMAGE, 0]
+        words[-1] = branch(crash_at + (len(words) - 1) * 4, CRASH_HOOK + 4)
+        crash_bl = len(blob) // 4 + bl_idx
+        blob.extend(struct.pack('>%dI' % len(words), *words))
         while len(blob) & 0x1F:
             blob.extend(struct.pack('>I', 0x60000000))
         logger_at = TEXT_ADDRESS + len(blob)
@@ -303,6 +320,9 @@ def inject(src, dst, log=False, log_only=False):
         idx, entry = log_patch
         blob[idx * 4:idx * 4 + 4] = struct.pack(
             '>I', branch(TEXT_ADDRESS + idx * 4, logger_at + entry) | 1)
+        blob[crash_bl * 4:crash_bl * 4 + 4] = struct.pack(
+            '>I', branch(TEXT_ADDRESS + crash_bl * 4, logger_at + crash_entry) | 1)
+        locations[CRASH_HOOK] = crash_at
 
     if TEXT_ADDRESS + len(blob) > TEXT_LIMIT:
         raise AssertionError(
@@ -317,7 +337,7 @@ def inject(src, dst, log=False, log_only=False):
 
 def _inject_log_only(d, dst):
     """Retail game plus the SI logger only: no controller hooks at all."""
-    stub, logger, entry, bl_idx = build_logger()
+    stub, logger, entry, bl_idx, _ = build_logger()
     blob = bytearray(SCRATCH_BYTES)
     stub_at = TEXT_ADDRESS + len(blob)
     words = stub + [HOOK_PREIMAGE[LOG_HOOK], 0]
