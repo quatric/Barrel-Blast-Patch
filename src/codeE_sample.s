@@ -82,7 +82,12 @@ dev_ok:
     cmpwi   3, 0
     bne     patch_real
 
-    # No Wii Remote sample queued: fabricate one.
+    # No Wii Remote sample queued: fabricate three. A real Wii Remote
+    # delivers 2-3 samples per read (USB Gecko log), and the drum logic in
+    # read_kpad_acc runs once per sample, so a single synthesised sample made
+    # a remote-less player far less responsive than one with a real remote.
+    li      0, 3                # samples to publish (r0 is dead at this hook)
+synth_loop:
     cmplwi  4, 0x10
     blt     index_ok
     li      4, 0
@@ -101,10 +106,14 @@ zero_loop:
     bl      mark                # extension valid / no error / Nunchuk-class
 
     addi    4, 4, 1
+    addic.  0, 0, -1
+    bne     synth_loop
+
     stb     4, 0x10e(31)        # advance write index (wraps on next read)
+    li      6, 3
+    stb     6, 0x10f(31)        # publish three samples
     li      6, 1
-    stb     6, 0x10f(31)        # publish one sample
-    stb     6, 0(7)             # remember it was ours
+    stb     6, 0(7)             # remember they were ours
     b       out
 
     # Real samples queued with no extension: mark the newest `count` entries,

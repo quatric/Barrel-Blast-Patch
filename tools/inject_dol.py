@@ -154,17 +154,6 @@ def hbm_gate(location, body_location, hook, preimage, cc_ok=False):
     return out
 
 
-# read_kpad_acc processes the Nunchuk motion block only for sample device
-# types 4 and 5 (0x802462D4-0x802462E8) -- the block the left drum is
-# written into. A Classic Controller sample is type 2, so its left drum
-# never reached the game. The final `b exit` there is redirected to a
-# three-instruction cave that also lets type 2 through. The Wii Remote's own
-# Nunchuk-block motion stays out: codeF zeroes the Nunchuk scale factors
-# while a Classic Controller is active.
-CC_ACC_GATE = 0x802462E8
-CC_ACC_PREIMAGE = 0x480002A0      # b 0x80246588
-CC_ACC_BLOCK = 0x802462EC
-
 LOG_HOOK = 0x80247ADC      # the logger stub runs first at KPADRead's entry
 # __OSUnhandledException(type, context, dsisr, dar): with --log, a stub here
 # sends the crash essentials over the Gecko before the OS's own dump, which
@@ -264,18 +253,57 @@ def repair_multiplayer(codeb):
         words[102] = 0x38800006
     elif words[102] != 0x38800006:
         raise AssertionError(f'codeB left-stroke duration changed: {words[102]:#010x}')
+
+    # The left stroke is stored into +0x74/+0x78 (and a sign into +0x6C):
+    # Nunchuk acc fields for the GameCube path, but for a Classic Controller
+    # they are its right stick (and left stick X) -- and codeB runs before
+    # the IR routine, so codeD's Classic pointer read the drum values
+    # instead of the stick. The game never used these as a left drum for a
+    # Classic Controller anyway. Route the three stores through a cave that
+    # skips them when KPAD dev_type (+0x5C) is 2.
+    stores = [0x90FE0074, 0x90FE0078, 0x917E006C]
+    if words[106:109] != stores:
+        raise AssertionError(f'codeB left-stroke stores changed: {words[106:109]}')
+    cave = len(words) - 2                  # just before the reproduced instruction
+
+    def rel_target(i, w):
+        op = w >> 26
+        if op == 18 and not w & 3:             # b (no link, relative)
+            off = w & 0x03FFFFFC
+            return i + ((off - 0x04000000) if off & 0x02000000 else off) // 4
+        if op == 16 and not w & 3:             # bc (relative)
+            off = w & 0xFFFC
+            return i + ((off - 0x10000) if off & 0x8000 else off) // 4
+        return None
+    to_orig = [i for i, w in enumerate(words) if rel_target(i, w) == cave]
+    body = [0x881E005C,                    # lbz   r0,0x5c(r30)
+            0x2C000002,                    # cmpwi r0,2
+            0x41820010] + stores + [0]     # beq   +0x10 (skip stores); b back
+    body[-1] = branch((cave + 6) * 4, 109 * 4)
+    if len(body) % 2:
+        body.append(0x60000000)
+    words[cave:cave] = body
+    orig = cave + len(body)
+    for i in to_orig:                          # keep jumps to the original
+        w = words[i]                           # instruction pointed at it
+        if w >> 26 == 18:
+            words[i] = (w & 0xFC000003) | branch(i * 4, orig * 4) & 0x03FFFFFC
+        else:
+            words[i] = (w & 0xFFFF0003) | (((orig - i) * 4) & 0xFFFC)
+    words[106] = branch(106 * 4, cave * 4)
+    words[107] = words[108] = 0x60000000
     return words
 
 
 def repair_pointer(coded):
     """Keep Classic Controller IR reads away from the left-drum vector."""
     words = list(coded)
-    replacements = {0xC03F0074: 0xC03F007C, 0xC05F0078: 0xC05F0080}
-    found = {old: 0 for old in replacements}
-    for index, word in enumerate(words):
-        if word in replacements:
-            found[word] += 1
-            words[index] = replacements[word]
+    # codeD reads the Classic right stick from +0x74/+0x78. An earlier repair
+    # redirected those loads to +0x7C/+0x80 to dodge codeB's left-stroke
+    # stores -- but those are the analog triggers, so the Classic pointer
+    # followed the triggers. codeB now leaves +0x74/+0x78 alone on a
+    # Classic Controller, so the original loads are right.
+    found = {w: sum(1 for x in words if x == w) for w in (0xC03F0074, 0xC05F0078)}
     if found != {0xC03F0074: 1, 0xC05F0078: 1}:
         raise AssertionError(f'unexpected codeD Classic stick loads: {found}')
     # Same channel-1 bug codeB had: `ori r5,r5,0x524` computes
@@ -364,24 +392,6 @@ def inject(src, dst, log=False, log_only=False):
         words[-1] = branch(location + (len(words) - 1) * 4, hook + 4)
         locations[hook] = entry
         blob.extend(struct.pack('>%dI' % len(words), *words))
-
-    got = struct.unpack('>I', d.read(CC_ACC_GATE, 4))[0]
-    if got != CC_ACC_PREIMAGE:
-        raise AssertionError(f'Classic acc gate 0x{CC_ACC_GATE:08X}: found 0x{got:08X}')
-    while len(blob) & 0x1F:
-        blob.extend(struct.pack('>I', 0x60000000))
-    cave = TEXT_ADDRESS + len(blob)
-    blob.extend(struct.pack('>3I',
-                            0x28000002,                               # cmplwi r0,2
-                            0x41820000 | ((CC_ACC_BLOCK - (cave + 4)) & 0xFFFC)
-                            if -0x8000 <= CC_ACC_BLOCK - (cave + 4) < 0x8000 else 0,
-                            branch(cave + 8, CC_ACC_GATE + 0x2A0)))  # b exit
-    if struct.unpack('>I', blob[-8:-4])[0] == 0:
-        # conditional branch can't reach; use bne +8 / b block instead
-        blob[-12:] = struct.pack('>4I', 0x28000002, 0x40820008,
-                                 branch(cave + 8, CC_ACC_BLOCK),
-                                 branch(cave + 12, CC_ACC_GATE + 0x2A0))
-    locations[CC_ACC_GATE] = cave
 
     if log:
         got = struct.unpack('>I', d.read(CRASH_HOOK, 4))[0]
