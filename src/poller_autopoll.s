@@ -6,10 +6,11 @@
     # Software cannot write those result registers -- that was the bug that
     # made the earlier build work in Dolphin and nowhere else.
     #
-    # SIGetType is deliberately called for the current channel each pass. Its
-    # SDK implementation caches/throttles probes, but schedules a fresh type
-    # transfer after disconnect/error, which is what makes a reinserted pad
-    # come back without rebooting the game.
+    # SIGetType is called only for a channel whose cached type is not a
+    # confirmed standard pad (8 = no response, 0x80 = probe pending, or
+    # anything else). si:: never learns this game polls, so for a confirmed
+    # pad it would re-probe every ~50 ms and flip the type to pending each
+    # time; skipping the call keeps confirmed pads stable and polled.
 
     stwu    1, -0x20(1)
     stw     0, 0x1c(1)
@@ -21,10 +22,24 @@
     mflr    0
     stw     0, 0x0c(1)
 
+    cmplwi  3, 3
+    bgt     probe_done
+    lis     12, 0x8033
+    ori     12, 12, 0x1550      # si:: cached type per channel
+    slwi    4, 3, 2
+    lwzx    4, 12, 4
+    andi.   12, 4, 0x80
+    bne     do_probe            # pending: let SIGetType follow it up
+    rlwinm  12, 4, 0, 3, 4      # & 0x18000000
+    lis     4, 0x0800
+    cmpw    12, 4
+    beq     probe_done          # confirmed standard pad: leave it alone
+do_probe:
     lis     12, 0x801f
     ori     12, 12, 0x4fa0      # si::SIGetType(channel)
     mtctr   12
     bctrl
+probe_done:
     lwz     0, 0x0c(1)
     mtlr    0
     # Un-stick a probe that can never finish. SIGetType parks the cached
@@ -126,15 +141,32 @@ norep_next:
     oris    4, 4, 0x8000
     stw     4, 0x6438(3)
 
-    # Poll (and copy-on-vblank) all four channels, all the time. Gating
-    # this on the cached type was tried and backfired: si:: decides whether
-    # a channel is "polled" from its own shadow of SIPOLL, which this game
-    # never sets, so SIGetType re-probes every ~50 ms and flips the cached
-    # type to 0x80 (pending) each time -- which switched polling on and off
-    # continuously, dropping pad input. The hardware runs a type transfer
-    # alongside polling without trouble; polling an empty port just latches
-    # NOREP, which the re-probe logic above wants anyway.
-    li      7, 0xFF             # EN + VBCPY for channels 0-3
+    # Enable polling (and copy-on-vblank) only for channels whose cached
+    # type is a confirmed standard pad ((type & 0x18000000) == 0x08000000,
+    # not the 0x80 pending sentinel). On real hardware a channel's type
+    # probe only succeeds while that channel is not being polled -- with
+    # all four polled continuously, a replugged pad never came back -- and
+    # the SDK likewise disables polling for a channel before probing it.
+    # Confirmed pads are no longer re-probed (see SIGetType above), so
+    # their polling stays on.
+    li      7, 0                # enable mask
+    li      8, 0
+en_loop:
+    slwi    10, 8, 2
+    lwzx    10, 6, 10
+    andi.   11, 10, 0x80
+    bne     en_next             # probe pending
+    rlwinm  11, 10, 0, 3, 4     # & 0x18000000
+    lis     12, 0x0800
+    cmpw    11, 12
+    bne     en_next
+    li      11, 0x88            # EN + VBCPY bits for channel 0
+    srw     11, 11, 8
+    or      7, 7, 11
+en_next:
+    addi    8, 8, 1
+    cmpwi   8, 4
+    blt     en_loop
 
     lwz     0, 0x6430(3)        # SIPOLL
     rlwinm  0, 0, 0, 0, 23      # clear the enable/VBCPY byte, keep X/Y
@@ -237,4 +269,5 @@ wd_done:
     lwz     4, 0x14(1)
     lwz     5, 0x08(1)
     addi    1, 1, 0x20
+    nop                         # pad: C2 bodies need an odd word count
     stwu    1, -0xc0(1)         # ORIGINAL INSTRUCTION
