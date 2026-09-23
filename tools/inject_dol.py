@@ -154,6 +154,17 @@ def hbm_gate(location, body_location, hook, preimage, cc_ok=False):
     return out
 
 
+# read_kpad_acc processes the Nunchuk motion block only for sample device
+# types 4 and 5 (0x802462D4-0x802462E8) -- the block the left drum is
+# written into. A Classic Controller sample is type 2, so its left drum
+# never reached the game. The final `b exit` there is redirected to a
+# three-instruction cave that also lets type 2 through. The Wii Remote's own
+# Nunchuk-block motion stays out: codeF zeroes the Nunchuk scale factors
+# while a Classic Controller is active.
+CC_ACC_GATE = 0x802462E8
+CC_ACC_PREIMAGE = 0x480002A0      # b 0x80246588
+CC_ACC_BLOCK = 0x802462EC
+
 LOG_HOOK = 0x80247ADC      # the logger stub runs first at KPADRead's entry
 # __OSUnhandledException(type, context, dsisr, dar): with --log, a stub here
 # sends the crash essentials over the Gecko before the OS's own dump, which
@@ -353,6 +364,24 @@ def inject(src, dst, log=False, log_only=False):
         words[-1] = branch(location + (len(words) - 1) * 4, hook + 4)
         locations[hook] = entry
         blob.extend(struct.pack('>%dI' % len(words), *words))
+
+    got = struct.unpack('>I', d.read(CC_ACC_GATE, 4))[0]
+    if got != CC_ACC_PREIMAGE:
+        raise AssertionError(f'Classic acc gate 0x{CC_ACC_GATE:08X}: found 0x{got:08X}')
+    while len(blob) & 0x1F:
+        blob.extend(struct.pack('>I', 0x60000000))
+    cave = TEXT_ADDRESS + len(blob)
+    blob.extend(struct.pack('>3I',
+                            0x28000002,                               # cmplwi r0,2
+                            0x41820000 | ((CC_ACC_BLOCK - (cave + 4)) & 0xFFFC)
+                            if -0x8000 <= CC_ACC_BLOCK - (cave + 4) < 0x8000 else 0,
+                            branch(cave + 8, CC_ACC_GATE + 0x2A0)))  # b exit
+    if struct.unpack('>I', blob[-8:-4])[0] == 0:
+        # conditional branch can't reach; use bne +8 / b block instead
+        blob[-12:] = struct.pack('>4I', 0x28000002, 0x40820008,
+                                 branch(cave + 8, CC_ACC_BLOCK),
+                                 branch(cave + 12, CC_ACC_GATE + 0x2A0))
+    locations[CC_ACC_GATE] = cave
 
     if log:
         got = struct.unpack('>I', d.read(CRASH_HOOK, 4))[0]
