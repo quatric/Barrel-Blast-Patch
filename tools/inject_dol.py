@@ -26,6 +26,9 @@ TEXT_ADDRESS = 0x80001820
 #   +0x10         gecko_log.c: last log line time base
 #   +0x14..+0x17  SI poller: per-channel consecutive-NOREP counters
 SCRATCH_BYTES = 0x20
+# The section must end before the OS's low-memory globals at 0x80003000
+# (IPC, boot info, reset state); running into them blackscreens at boot.
+TEXT_LIMIT = 0x80003000
 
 # Hooks that stand down while the HOME Menu is open, so only the Wii Remote
 # drives it: buttons and the IR pointer. CHomeButtonMenu is a singleton
@@ -296,6 +299,10 @@ def inject(src, dst, log=False, log_only=False):
         blob[idx * 4:idx * 4 + 4] = struct.pack(
             '>I', branch(TEXT_ADDRESS + idx * 4, logger_at + entry) | 1)
 
+    if TEXT_ADDRESS + len(blob) > TEXT_LIMIT:
+        raise AssertionError(
+            f'injected section ends at 0x{TEXT_ADDRESS + len(blob):08X}, past '
+            f'0x{TEXT_LIMIT:08X} (OS low-memory globals)')
     section = d.add_text_section(TEXT_ADDRESS, blob)
     for hook, location in locations.items():
         d.write(hook, struct.pack('>I', branch(hook, location)))
@@ -318,6 +325,7 @@ def _inject_log_only(d, dst):
     idx = (stub_at - TEXT_ADDRESS) // 4 + bl_idx
     blob[idx * 4:idx * 4 + 4] = struct.pack(
         '>I', branch(TEXT_ADDRESS + idx * 4, logger_at + entry) | 1)
+    assert TEXT_ADDRESS + len(blob) <= TEXT_LIMIT, 'log-only section too large'
     section = d.add_text_section(TEXT_ADDRESS, blob)
     d.write(LOG_HOOK, struct.pack('>I', branch(LOG_HOOK, stub_at)))
     d.save(dst)

@@ -7,6 +7,7 @@
  *
  *   T<tb> B<busy> P<si.poll shadow> t<type0>,<type1>,<type2>,<type3>
  *     S<SISR> L<SIPOLL> C<SICOMCSR> I<C0INBUFH>,<C0INBUFL>
+ *     H<CHomeButtonMenu vtable word>,<open flag word> X<ch0 pointer x>,<y>
  *
  * Called from a hook stub at KPADRead's entry. Position independent: no
  * globals, only fixed hardware/game addresses; the rate-limit stamp lives
@@ -21,7 +22,7 @@ typedef unsigned int u32;
 #define EXI1_DATA   REG(0xCD006824)
 #define STAMP       REG(0x80001830)     /* scratch word 4 (poller uses 0-3) */
 
-static u32 exchange(u32 v)
+static __attribute__((noinline)) u32 exchange(u32 v)
 {
     EXI1_CSR = 0xD0;                    /* device 0, 32 MHz */
     EXI1_DATA = v;
@@ -33,14 +34,14 @@ static u32 exchange(u32 v)
     return v;
 }
 
-static void put(u32 c)
+static __attribute__((noinline)) void put(u32 c)
 {
     int tries = 256;
     while (tries-- && !(exchange(0xB0000000 | (c << 20)) & 0x04000000))
         ;
 }
 
-static void hex(u32 v)
+static __attribute__((noinline)) void hex(u32 v)
 {
     int i;
     for (i = 28; i >= 0; i -= 4) {
@@ -49,7 +50,7 @@ static void hex(u32 v)
     }
 }
 
-static void field(u32 tag, u32 v)
+static __attribute__((noinline)) void field(u32 tag, u32 v)
 {
     put(tag);
     hex(v);
@@ -83,6 +84,16 @@ void gecko_log(void)
     hex(REG(0xCD006404));
     put(',');
     hex(REG(0xCD006408));
+    put(' ');
+    put('H');
+    hex(REG(0x80531B80));               /* expect 802E7288 */
+    put(',');
+    hex(REG(0x80531BB0));               /* open flag is the byte at +0x32 */
+    put(' ');
+    put('X');
+    hex(REG(0x803C91C0 + 0x20));        /* KPAD ch0 pointer position */
+    put(',');
+    hex(REG(0x803C91C0 + 0x24));
     put('\r');
     put('\n');
 }
