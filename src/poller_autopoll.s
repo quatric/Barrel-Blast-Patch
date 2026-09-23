@@ -130,6 +130,22 @@ ypresent:
     or      0, 0, 7
     stw     0, 0x6430(3)
 
+    # Mirror the enable/VBCPY byte into si::'s own SIPOLL shadow. The VI
+    # retrace handler (0x801D1A70) calls SIRefreshSamplingRate whenever its
+    # refresh flag is set, which ends in SISetXY writing SIPOLL = shadow |
+    # X/Y -- and this game never enables polling through si::, so the
+    # shadow's enable byte was 0 and every refresh switched our polling
+    # back off (caught by the USB Gecko logger: SIPOLL read back 0x01EC0200
+    # every sample). With the shadow in step, those rewrites keep polling
+    # on, and si:: treats our channels as polled: SIGetType returns the
+    # cached type for them instead of re-probing, except after "no
+    # response", which it still re-probes.
+    lis     12, 0x8033
+    lwz     11, 0x153c(12)      # si:: SIPOLL shadow
+    rlwinm  11, 11, 0, 0, 23
+    or      11, 11, 7
+    stw     11, 0x153c(12)
+
     # Hot-plug watchdog. si::__SITransfer (0x801f48ec) gates every SI
     # transfer -- SIGetType included -- behind ONE global "busy" flag at
     # 0x80331538 (-1 = idle); if it isn't -1, __SITransfer just no-ops.
@@ -222,4 +238,5 @@ wd_done:
     lwz     4, 0x14(1)
     lwz     5, 0x08(1)
     addi    1, 1, 0x20
+    nop                         # pad: C2 bodies need an odd word count
     stwu    1, -0xc0(1)         # ORIGINAL INSTRUCTION

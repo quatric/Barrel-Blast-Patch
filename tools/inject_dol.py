@@ -8,6 +8,8 @@ section and replaces each verified hook instruction with a direct branch.
 import os
 import re
 import struct
+import subprocess
+import tempfile
 
 from dol import Dol
 
@@ -118,6 +120,46 @@ def hbm_gate(location, body_location, hook, preimage):
     return words
 
 
+LOG_HOOK = 0x80247ADC      # the logger stub runs first at KPADRead's entry
+DEVKITPPC = os.environ.get('DEVKITPPC', '/opt/devkitpro/devkitPPC') + '/bin/'
+
+
+def _words(path):
+    data = open(path, 'rb').read()
+    return list(struct.unpack('>%dI' % (len(data) // 4), data))
+
+
+def build_logger():
+    """Assemble the stub and compile src/gecko_log.c; returns
+    (stub_words, logger_words, gecko_log_offset)."""
+    src = os.path.join(HERE, '..', 'src')
+    with tempfile.TemporaryDirectory() as tmp:
+        o, b = os.path.join(tmp, 's.o'), os.path.join(tmp, 's.bin')
+        subprocess.run([DEVKITPPC + 'powerpc-eabi-as', '-mbig', '-mgekko', '-o', o,
+                        os.path.join(src, 'gecko_log_stub.s')], check=True)
+        subprocess.run([DEVKITPPC + 'powerpc-eabi-objcopy', '-O', 'binary', o, b], check=True)
+        stub = _words(b)
+        subprocess.run([DEVKITPPC + 'powerpc-eabi-gcc', '-O2', '-mcpu=750', '-meabi',
+                        '-msoft-float', '-mno-sdata', '-ffreestanding', '-fno-builtin',
+                        '-fno-common', '-fno-asynchronous-unwind-tables', '-fno-exceptions',
+                        '-c', os.path.join(src, 'gecko_log.c'), '-o', o],
+                       check=True)
+        relocs = subprocess.run([DEVKITPPC + 'powerpc-eabi-objdump', '-r', o],
+                                capture_output=True, text=True, check=True).stdout
+        if 'R_PPC' in relocs:
+            raise AssertionError('gecko_log.c must compile without relocations:\n' + relocs)
+        syms = subprocess.run([DEVKITPPC + 'powerpc-eabi-nm', o],
+                              capture_output=True, text=True, check=True).stdout
+        entry = int(next(l.split()[0] for l in syms.splitlines()
+                         if l.endswith(' gecko_log')), 16)
+        subprocess.run([DEVKITPPC + 'powerpc-eabi-objcopy', '-O', 'binary',
+                        '-j', '.text', o, b], check=True)
+        logger = _words(b)
+    bl = [i for i, w in enumerate(stub) if w == 0x48000001]
+    assert len(bl) == 1, 'stub must contain exactly one `bl .` placeholder'
+    return stub, logger, entry, bl[0]
+
+
 def parse_gecko_ini(path=INI):
     lines = open(path).read().splitlines()
     result, i = {}, 0
@@ -187,13 +229,14 @@ def repair_pointer(coded):
     return words
 
 
-def inject(src, dst):
+def inject(src, dst, log=False, log_only=False):
     d = Dol(src)
     bodies = parse_gecko_ini()
     bodies[0x80246588] = repair_multiplayer(bodies[0x80246588])
     bodies[0x80247500] = repair_pointer(bodies[0x80247500])
 
-    for hook in HOOK_ORDER:
+    order = [] if log_only else HOOK_ORDER
+    for hook in order or [LOG_HOOK]:
         raw = d.read(hook, 4)
         if raw is None:
             raise AssertionError(f'hook address 0x{hook:08X} is not mapped (wrong DOL)')
@@ -203,6 +246,9 @@ def inject(src, dst):
             raise AssertionError(
                 f'hook 0x{hook:08X}: expected 0x{expected:08X}, found 0x{got:08X} '
                 f'(wrong revision or already patched)')
+
+    if log_only:
+        return _inject_log_only(d, dst)
 
     # Relax CNunchakaCheck's two extension-type comparisons from "==1" to
     # "!=0" (see NUNCHUK_CHECK_COMPARES). The branch instructions themselves
@@ -221,6 +267,10 @@ def inject(src, dst):
         while len(blob) & 0x1F:
             blob.extend(struct.pack('>I', 0x60000000))
         entry = TEXT_ADDRESS + len(blob)
+        if log and hook == LOG_HOOK:
+            stub, logger, log_entry, bl_idx = build_logger()
+            log_patch = (len(blob) // 4 + bl_idx, log_entry)
+            blob.extend(struct.pack('>%dI' % len(stub), *stub))
         if hook in HBM_GATED:
             gate_len = 28 * 4
             body_location = entry + gate_len
@@ -235,6 +285,15 @@ def inject(src, dst):
         locations[hook] = entry
         blob.extend(struct.pack('>%dI' % len(words), *words))
 
+    if log:
+        while len(blob) & 0x1F:
+            blob.extend(struct.pack('>I', 0x60000000))
+        logger_at = TEXT_ADDRESS + len(blob)
+        blob.extend(struct.pack('>%dI' % len(logger), *logger))
+        idx, entry = log_patch
+        blob[idx * 4:idx * 4 + 4] = struct.pack(
+            '>I', branch(TEXT_ADDRESS + idx * 4, logger_at + entry) | 1)
+
     section = d.add_text_section(TEXT_ADDRESS, blob)
     for hook, location in locations.items():
         d.write(hook, struct.pack('>I', branch(hook, location)))
@@ -242,13 +301,38 @@ def inject(src, dst):
     return section, locations, len(blob)
 
 
+def _inject_log_only(d, dst):
+    """Retail game plus the SI logger only: no controller hooks at all."""
+    stub, logger, entry, bl_idx = build_logger()
+    blob = bytearray(SCRATCH_BYTES)
+    stub_at = TEXT_ADDRESS + len(blob)
+    words = stub + [HOOK_PREIMAGE[LOG_HOOK], 0]
+    words[-1] = branch(stub_at + (len(words) - 1) * 4, LOG_HOOK + 4)
+    blob.extend(struct.pack('>%dI' % len(words), *words))
+    while len(blob) & 0x1F:
+        blob.extend(struct.pack('>I', 0x60000000))
+    logger_at = TEXT_ADDRESS + len(blob)
+    blob.extend(struct.pack('>%dI' % len(logger), *logger))
+    idx = (stub_at - TEXT_ADDRESS) // 4 + bl_idx
+    blob[idx * 4:idx * 4 + 4] = struct.pack(
+        '>I', branch(TEXT_ADDRESS + idx * 4, logger_at + entry) | 1)
+    section = d.add_text_section(TEXT_ADDRESS, blob)
+    d.write(LOG_HOOK, struct.pack('>I', branch(LOG_HOOK, stub_at)))
+    d.save(dst)
+    return section, {LOG_HOOK: stub_at}, len(blob)
+
+
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument('src')
     ap.add_argument('dst')
+    ap.add_argument('--log', action='store_true',
+                    help='also print SI state over a USB Gecko in slot B (src/gecko_log.c)')
+    ap.add_argument('--log-only', action='store_true',
+                    help='retail game plus the SI logger only, no controller hooks')
     args = ap.parse_args()
-    section, locations, size = inject(args.src, args.dst)
+    section, locations, size = inject(args.src, args.dst, args.log, args.log_only)
     print(f'injected {len(locations)} hooks into text section {section} at '
           f'0x{TEXT_ADDRESS:08X} ({size} bytes)')
     for hook, body in locations.items():
