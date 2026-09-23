@@ -43,9 +43,13 @@
     stw     6, 0x10(1)
     stw     7, 0x0c(1)
 
-    lbz     3, 0x5c(31)         # active Wii extension type
-    cmpwi   3, 0
-    bne     done                # never touch Classic/Nunchuk/Bongo state
+    lbz     3, 0x5c(31)         # KPAD dev_type: 0 = bare Wii Remote,
+    cmpwi   3, 0                # 0xFD = no Wii Remote on this channel
+    beq     dev_ok
+    cmpwi   3, 0xFD             # (seen on hardware: a GameCube pad on a
+    bne     done                # remote-less channel was ignored because
+dev_ok:                         # only 0 was accepted); never touch
+                                # Classic/Nunchuk/Bongo state
 
     cmpwi   27, 4
     bge     done                # channel out of range
