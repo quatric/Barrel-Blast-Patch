@@ -21,8 +21,10 @@ INI = os.path.join(HERE, '..', 'codes', 'RDKE01.ini')
 # the game into a black screen. Every other word of the section survives, so
 # starting 32 bytes in keeps the whole injected section clear of it.
 TEXT_ADDRESS = 0x80001820
-# The first SCRATCH_BYTES of the section are zeroed data, not code: the SI
-# poller keeps per-channel "pending since" time-base stamps there.
+# The first SCRATCH_BYTES of the section are zeroed data, not code:
+#   +0x00..+0x0F  SI poller: per-channel last-probe time base
+#   +0x10         gecko_log.c: last log line time base
+#   +0x14..+0x17  SI poller: per-channel consecutive-NOREP counters
 SCRATCH_BYTES = 0x20
 
 # Hooks that stand down while the HOME Menu is open, so only the Wii Remote

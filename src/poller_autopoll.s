@@ -35,6 +35,22 @@
     cmpw    12, 4
     beq     probe_done          # confirmed standard pad: leave it alone
 do_probe:
+    # At most one probe per channel every 0.25 s. Probing the empty ports
+    # every frame collided with the pad's polling on real hardware (USB
+    # Gecko log: channel 0's SISR byte read 0x0C, NOREP|COLL, while ports
+    # 1-3 had a type transfer in flight), which is what knocked a
+    # connected pad back to "no response" over and over.
+    lis     12, 0x8000
+    ori     12, 12, 0x1820      # per-channel last-probe time base
+    slwi    4, 3, 2
+    mftb    6
+    lwzx    7, 12, 4
+    subf    8, 7, 6
+    lis     9, 0x00E7
+    ori     9, 9, 0xBE2C        # 15,187,500 ticks = 0.25 s
+    cmplw   8, 9
+    blt     probe_done
+    stwx    6, 12, 4
     lis     12, 0x801f
     ori     12, 12, 0x4fa0      # si::SIGetType(channel)
     mtctr   12
@@ -59,14 +75,30 @@ probe_done:
     ori     6, 6, 0x1550        # si:: cached type per channel (4 words)
     li      8, 0                # channel
     li      9, 8                # "no response" type
+    lis     12, 0x8000
+    ori     12, 12, 0x1834      # per-channel consecutive-NOREP counters
 norep_loop:
     slwi    10, 8, 3
     lis     11, 0x0800          # channel 0's NOREP bit
     srw     11, 11, 10
+    lbzx    7, 12, 8
     and.    11, 11, 4
-    beq     norep_next
+    beq     norep_clear
+    # Only a NOREP that persists means the pad is gone: a single one also
+    # latches from a collision with a type probe on another channel. ~40
+    # consecutive sightings (4 poller calls per frame, so ~10 frames).
+    cmplwi  7, 40
+    bge     norep_mark
+    addi    7, 7, 1
+    stbx    7, 12, 8
+    b       norep_next
+norep_mark:
     slwi    10, 8, 2
     stwx    9, 6, 10
+    b       norep_next
+norep_clear:
+    li      7, 0
+    stbx    7, 12, 8
 norep_next:
     addi    8, 8, 1
     cmpwi   8, 4
