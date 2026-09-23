@@ -135,4 +135,15 @@ void gecko_crash(u32 type, u32 *ctx, u32 dsisr, u32 dar)
         hex(ctx[i]);
         put((i & 7) == 7 ? '\n' : ' ');
     }
+    /* The words around SRR0 as memory holds them now -- an illegal
+     * instruction at an address that holds valid code means something
+     * overwrote it. */
+    sp = ctx[0x198 / 4] & ~0x1F;
+    if (sp >= 0x80000000 && sp < 0x81800000) {
+        put('M'); put(' '); hex(sp); put('\n');
+        for (i = 0; i < 16; i++) {
+            hex(((u32 *)sp)[i]);
+            put((i & 7) == 7 ? '\n' : ' ');
+        }
+    }
 }

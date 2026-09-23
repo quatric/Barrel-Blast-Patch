@@ -243,6 +243,14 @@ def repair_pointer(coded):
             words[index] = replacements[word]
     if found != {0xC03F0074: 1, 0xC05F0078: 1}:
         raise AssertionError(f'unexpected codeD Classic stick loads: {found}')
+    # Same channel-1 bug codeB had: `ori r5,r5,0x524` computes
+    # 0x803C91C0 | 0x524 = 0x803C95E4, not channel 1's KPAD base 0x803C96E4,
+    # so the pointer hook never matched player 2 (found from a USB Gecko
+    # crash dump taken while codeD ran with r31 = 0x803C96E4).
+    ch1 = [i for i, w in enumerate(words) if w == 0x60A50524]
+    if len(ch1) != 1:
+        raise AssertionError(f'unexpected codeD channel-1 base words: {ch1}')
+    words[ch1[0]] = 0x38A50524        # addi r5,r5,0x524
     return words
 
 
