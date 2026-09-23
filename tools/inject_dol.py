@@ -251,6 +251,25 @@ def repair_pointer(coded):
     if len(ch1) != 1:
         raise AssertionError(f'unexpected codeD channel-1 base words: {ch1}')
     words[ch1[0]] = 0x38A50524        # addi r5,r5,0x524
+
+    # codeD keeps each channel's pointer position in the 8 data words after
+    # its leading `b code_start` (words 1-8), and finds them with
+    # `bl get_pc; get_pc: mflr r11; addi r11,r11,-40`. That -40 matches the
+    # source but not this body, where get_pc sits much further in: it
+    # pointed r11 into codeD's own channel-detect code, so storing the
+    # position (0.0 with the stick centred) overwrote its branches with
+    # zeros -- the illegal-instruction crashes caught by the USB Gecko
+    # crash dump, which showed those words zeroed in memory. Point it at
+    # the real data words.
+    assert words[0] >> 26 == 18, 'codeD must start with a branch over its data'
+    bl = [i for i, w in enumerate(words) if w == 0x48000005]     # bl +4
+    if len(bl) != 1 or words[bl[0] + 1] != 0x7D6802A6:            # mflr r11
+        raise AssertionError(f'unexpected codeD get_pc sequence at {bl}')
+    addi = bl[0] + 2
+    if words[addi] >> 16 != 0x396B:                               # addi r11,r11,x
+        raise AssertionError(f'codeD word {addi} is not addi r11,r11: {words[addi]:#010x}')
+    offset = (1 - (bl[0] + 1)) * 4                               # get_pc -> word 1
+    words[addi] = 0x396B0000 | (offset & 0xFFFF)
     return words
 
 
