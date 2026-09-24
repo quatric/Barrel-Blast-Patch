@@ -29,6 +29,7 @@ TEXT_ADDRESS = 0x80001820
 #   +0x1C..+0x1F  gecko_log.c: channel-0 queued-sample / read counters
 #   +0x20..+0x23  codeA gate: per-channel Classic Controller warm-up counters
 #   +0x40..+0x4F  cc_nunchuk.c: per-channel left-drum stroke state
+#   +0x50         address of codeD's per-channel pointer positions (for cc_nunchuk.c)
 SCRATCH_BYTES = 0x60
 # The section must end before the OS's low-memory globals at 0x80003000
 # (IPC, boot info, reset state); running into them blackscreens at boot.
@@ -100,7 +101,8 @@ def branch(src, dst):
     return 0x48000000 | (off & 0x03FFFFFC)
 
 
-def hbm_gate(location, body_location, hook, preimage, cc_ok=False, cc_warmup=False):
+def hbm_gate(location, body_location, hook, preimage, cc_ok=False, cc_warmup=False,
+             reset=None):
     """Stub: if the HOME Menu is open, run the original instruction and
     return to the game; otherwise fall through to the hook body. With
     cc_ok (hooks where r31 is the KPAD channel base), a channel whose
@@ -163,7 +165,16 @@ def hbm_gate(location, body_location, hook, preimage, cc_ok=False, cc_warmup=Fal
         0x8181000C,                                   # lwz   r12,0xc(r1)
         0x38210010,                                   # addi  r1,r1,0x10
     ]
-    words = head + ['run:'] + restore + ['b body'] + ['skip:'] + restore + [preimage, 'b back']
+    wipe = []
+    if reset:
+        # Zero words (e.g. codeD's stored pointer positions) while the HOME
+        # Menu is open, so the pointer starts centred when it closes.
+        addr, count = reset
+        wipe = [0x39800000,                           # li    r12,0
+                0x3D600000 | hi(addr)]                # lis   r11,addr@ha
+        wipe += [0x918B0000 | ((lo(addr) + 4 * i) & 0xFFFF) for i in range(count)]
+    words = head + ['run:'] + restore + ['b body'] + ['skip:'] + wipe + restore + \
+        [preimage, 'b back']
     labels, out = {}, []
     for w in words:
         if isinstance(w, str) and w.endswith(':'):
@@ -346,6 +357,24 @@ def repair_multiplayer(codeb):
     # instead of the stick. The game never used these as a left drum for a
     # Classic Controller anyway. Route the three stores through a cave that
     # skips them when KPAD dev_type (+0x5C) is 2.
+    # The stroke's +-10 sign flipped on every call (every KPAD sample). KPAD
+    # averages a frame's 3-4 samples, so +10/-10 over an even number of
+    # samples averaged to 0 and the shake was lost -- more often for a
+    # player whose remote delivers 2 samples a frame than one delivering 3.
+    # Flip once per ~17 ms (time-base bit 20) instead. This also frees KPAD
+    # +0x100, which the SI poller's watchdog uses.
+    if words[54:57] != [0x80BE0100, 0x68A50001, 0x90BE0100]:
+        raise AssertionError(f'codeB sign toggle changed: {words[54:57]}')
+    words[54:57] = [0x7CAC42E6,        # mftb   r5
+                    0x54A567FE,        # rlwinm r5,r5,12,31,31  (tb bit 20)
+                    0x60000000]
+
+    # Classic Controller left drum: L only (ZL does nothing, ZR is the jump).
+    zl = [i for i, w in enumerate(words) if w == 0x71202080]    # andi. r0,r9,0x2080
+    if len(zl) != 1:
+        raise AssertionError(f'codeB Classic L|ZL mask found {len(zl)} times')
+    words[zl[0]] = 0x71202000
+
     stores = [0x90FE0074, 0x90FE0078, 0x917E006C]
     if words[106:109] != stores:
         raise AssertionError(f'codeB left-stroke stores changed: {words[106:109]}')
@@ -389,6 +418,20 @@ def repair_stick(codec):
     if len(hits) != 1:
         raise AssertionError(f'unexpected codeC channel-1 base words: {hits}')
     words[hits[0]] = 0x38C60524       # addi r6,r6,0x524
+
+    # Character movement (the Nunchuk stick) comes from the GameCube C-stick
+    # (in_lo bytes 0-1), not the main stick (in_hi bytes 2-3), which now
+    # drives the pointer (codeD). The in_hi ERRSTAT check stays; the valid-
+    # response check's two words are reused to load in_lo.
+    swaps = {54: (0x75400080, 0x39496408),   # andis. r0,r10,0x80 -> addi r10,r9,0x6408
+             55: (0x41820038, 0x7D46502E),   # beq -> lwzx r10,r6,r10  (in_lo)
+             56: (0x5546C63E, 0x5546463E),   # X: in_hi byte 2 -> in_lo byte 0
+             61: (0x5547063E, 0x5547863E),   # Y: in_hi byte 3 -> in_lo byte 1
+             67: (0x5545063E, 0x5545863E)}   # Y again (r5)
+    for i, (old, new) in swaps.items():
+        if words[i] != old:
+            raise AssertionError(f'codeC word {i}: expected {old:#010x}, found {words[i]:#010x}')
+        words[i] = new
     return words
 
 
@@ -400,9 +443,20 @@ def repair_pointer(coded):
     # stores -- but those are the analog triggers, so the Classic pointer
     # followed the triggers. codeB now leaves +0x74/+0x78 alone on a
     # Classic Controller, so the original loads are right.
-    found = {w: sum(1 for x in words if x == w) for w in (0xC03F0074, 0xC05F0078)}
-    if found != {0xC03F0074: 1, 0xC05F0078: 1}:
-        raise AssertionError(f'unexpected codeD Classic stick loads: {found}')
+    # The pointer follows the left stick on both controllers: the Classic
+    # Controller's left stick (+0x6C/+0x70) instead of its right stick, and
+    # the GameCube main stick (SI in_hi bytes 2-3) instead of the C-stick
+    # (in_lo bytes 0-1).
+    swaps = {0xC03F0074: 0xC03F006C,  # lfs f1,0x74(r31) -> 0x6c
+             0xC05F0078: 0xC05F0070,  # lfs f2,0x78(r31) -> 0x70
+             0x398A6408: 0x398A6404,  # addi r12,r10,0x6408 -> 0x6404 (in_hi)
+             0x5588463E: 0x5588C63E,  # srwi r8,r12,24 -> rlwinm r8,r12,24,24,31
+             0x5589863E: 0x5589063E}  # rlwinm r9,r12,16,24,31 -> clrlwi r9,r12,24
+    for old, new in swaps.items():
+        hits = [i for i, w in enumerate(words) if w == old]
+        if len(hits) != 1:
+            raise AssertionError(f'codeD word {old:#010x} found {len(hits)} times')
+        words[hits[0]] = new
     # Same channel-1 bug codeB had: `ori r5,r5,0x524` computes
     # 0x803C91C0 | 0x524 = 0x803C95E4, not channel 1's KPAD base 0x803C96E4,
     # so the pointer hook never matched player 2 (found from a USB Gecko
@@ -479,9 +533,16 @@ def inject(src, dst, log=False, log_only=False):
         if hook in HBM_GATED:
             cc_ok = hook in HBM_CC_PASS
             warm = hook == CC_WARMUP_HOOK
-            gate_len = len(hbm_gate(entry, entry, hook, HOOK_PREIMAGE[hook], cc_ok, warm)) * 4
+            # codeD's per-channel pointer positions: the 8 words after its
+            # leading `b code_start` (see repair_pointer).
+            reset = (lambda body: (body + 4, 8)) if hook == 0x80247500 else None
+            gate_len = len(hbm_gate(entry, entry, hook, HOOK_PREIMAGE[hook], cc_ok, warm,
+                                    reset and reset(entry))) * 4
             body_location = entry + gate_len
-            gate = hbm_gate(entry, body_location, hook, HOOK_PREIMAGE[hook], cc_ok, warm)
+            gate = hbm_gate(entry, body_location, hook, HOOK_PREIMAGE[hook], cc_ok, warm,
+                            reset and reset(body_location))
+            if hook == 0x80247500:
+                blob[0x50:0x54] = struct.pack('>I', body_location + 4)
             blob.extend(struct.pack('>%dI' % len(gate), *gate))
         location = TEXT_ADDRESS + len(blob)
         words = list(bodies[hook])

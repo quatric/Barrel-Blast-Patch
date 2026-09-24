@@ -9,15 +9,17 @@
  * (0x8003A788), once KPAD and every hook have finished. For a Classic
  * Controller entry it:
  *
- *   - copies the left stick into the Nunchuk stick fields,
+ *   - copies the right stick into the Nunchuk stick fields (movement; the
+ *     left stick drives the pointer),
+ *   - writes codeD's stick-driven pointer position, so the Wii Remote's own
+ *     IR can't fight it on samples KPAD didn't run the IR routine for,
  *   - turns a left-drum press into the same 6-sample stroke codeB writes
  *     for a GameCube pad (+-10.0 on Nunchuk acc Y, alternating each sample,
  *     10.0 into the Nunchuk acc_value/acc_speed fields),
  *   - reports dev_type 1 (Nunchuk).
  *
- * Left drum = X / L / ZL (and ZR, the both-drums jump), or the analog L
- * trigger past ~40/255 -- the Classic Controller equivalents of the
- * GameCube pad's X / L / Z and analog L. The right drum already works
+ * Left drum = X / L, ZR (the both-drums jump, as the GameCube pad's Z), or
+ * the analog L trigger past ~40/255. ZL does nothing. The right drum already works
  * through the Wii Remote motion path (codeB), and the pointer, button
  * mapping and HOME Menu handling ran earlier on KPAD's own status.
  *
@@ -32,11 +34,17 @@ typedef unsigned char u8;
 #define B(p, off)   (*(volatile u8 *)((u8 *)(p) + (off)))
 
 #define KPAD_SIZE   0x84
-#define STATE       ((volatile u8 *)0x80001860)   /* scratch +0x40: 4 x {prev, count, sign, pad} */
+#define STATE       ((volatile u8 *)0x80001860)   /* scratch +0x40: 4 x {prev, count, -, -} */
 
 #define CL_HOLD     0x60
-#define CL_LSTICK_X 0x6C
-#define CL_LSTICK_Y 0x70
+#define CL_RSTICK_X 0x74
+#define CL_RSTICK_Y 0x78
+#define POS_X       0x20
+#define POS_Y       0x24
+#define VEC_X       0x28
+#define VEC_Y       0x2C
+#define DPD_VALID   0x5E
+#define CODED_POS   (*(volatile u32 *)0x80001870)   /* scratch +0x50 */
 #define CL_TRIG_L   0x7C
 #define NC_STICK_X  0x60
 #define NC_STICK_Y  0x64
@@ -47,7 +55,7 @@ typedef unsigned char u8;
 #define NC_ACC_SPD  0x78
 #define DEV_TYPE    0x5C
 
-#define LEFT_BUTTONS  (0x2000 | 0x0080 | 0x0008 | 0x0004)   /* L, ZL, X, ZR */
+#define LEFT_BUTTONS  (0x2000 | 0x0008 | 0x0004)            /* L, X, ZR */
 #define TRIG_ON       0x3E20A0A1        /* 40/255 = 0.157f */
 #define F_10          0x41200000        /* 10.0f */
 #define F_M10         0xC1200000        /* -10.0f */
@@ -68,8 +76,8 @@ void cc_convert(u32 count, u8 *entry, u32 chan)
             continue;
 
         buttons = W(entry, CL_HOLD);
-        lx = W(entry, CL_LSTICK_X);
-        ly = W(entry, CL_LSTICK_Y);
+        lx = W(entry, CL_RSTICK_X);
+        ly = W(entry, CL_RSTICK_Y);
         press = (buttons & LEFT_BUTTONS) ||
                 (!(W(entry, CL_TRIG_L) & 0x80000000) && W(entry, CL_TRIG_L) > TRIG_ON);
 
@@ -82,15 +90,27 @@ void cc_convert(u32 count, u8 *entry, u32 chan)
         W(entry, NC_ACC_X) = 0;
         W(entry, NC_ACC_Z) = 0;
         if (st[1]) {
+            u32 tb;
             st[1]--;
-            st[2] ^= 1;
-            W(entry, NC_ACC_Y) = st[2] ? F_M10 : F_10;
+            /* Flip once per ~17 ms (time-base bit 20), not per sample: the
+             * SDK averages a frame's samples, so alternating per sample
+             * cancels out whenever a frame has an even number of them. */
+            __asm__ volatile ("mftb %0" : "=r"(tb));
+            W(entry, NC_ACC_Y) = (tb & 0x00100000) ? F_M10 : F_10;
             W(entry, NC_ACC_VAL) = F_10;
             W(entry, NC_ACC_SPD) = F_10;
         } else {
             W(entry, NC_ACC_Y) = 0;
             W(entry, NC_ACC_VAL) = 0;
             W(entry, NC_ACC_SPD) = 0;
+        }
+        if (CODED_POS) {
+            volatile u32 *pos = (volatile u32 *)CODED_POS + chan * 2;
+            W(entry, POS_X) = pos[0];
+            W(entry, POS_Y) = pos[1];
+            W(entry, VEC_X) = pos[0];
+            W(entry, VEC_Y) = pos[1];
+            B(entry, DPD_VALID) |= 2;
         }
         B(entry, DEV_TYPE) = 1;
     }
