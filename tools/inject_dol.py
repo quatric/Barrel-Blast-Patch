@@ -62,7 +62,10 @@ HOOK_ORDER = [
     0x80247ADC,  # SI poller
     0x80248090,  # buttons
     0x80246588,  # acceleration / drums
-    0x8024791C,  # stick
+    # 0x8024791C (codeC, stick) is no longer injected: cc_nunchuk.c sets the
+    # Nunchuk stick for GameCube and Classic players in the game's copy of
+    # each status, which overrode everything codeC wrote. repair_stick()
+    # stays so the body is still checked if it's ever re-enabled.
     0x80247500,  # IR pointer
     0x80247BE0,  # synthetic KPAD sample
     0x80247FA8,  # neutralize Wii Remote motion while a pad/CC is active
@@ -167,12 +170,25 @@ def hbm_gate(location, body_location, hook, preimage, cc_ok=False, cc_warmup=Fal
     ]
     wipe = []
     if reset:
-        # Zero words (e.g. codeD's stored pointer positions) while the HOME
-        # Menu is open, so the pointer starts centred when it closes.
-        addr, count = reset
-        wipe = [0x39800000,                           # li    r12,0
-                0x3D600000 | hi(addr)]                # lis   r11,addr@ha
-        wipe += [0x918B0000 | ((lo(addr) + 4 * i) & 0xFFFF) for i in range(count)]
+        # While the HOME Menu is open (r31 = KPAD channel base at codeD's
+        # site), copy the real Wii Remote's pointer (KPAD +0x20/+0x24) into
+        # codeD's stored position for this channel, so the stick-driven
+        # pointer picks up where the remote was aiming when the menu closes.
+        # channel = (r31 - 0x803C91C0) * 3188 >> 22  (exact for 0..3).
+        addr, _ = reset
+        wipe = [0x3D60803C,                           # lis   r11,0x803C
+                0x616B91C0,                           # ori   r11,r11,0x91C0
+                0x7D8BF850,                           # subf  r12,r11,r31
+                0x1D8C0C74,                           # mulli r12,r12,3188
+                0x558C55BE,                           # srwi  r12,r12,22
+                0x558C1838,                           # slwi  r12,r12,3
+                0x3D600000 | hi(addr),                # lis   r11,addr@ha
+                0x396B0000 | lo(addr),                # addi  r11,r11,addr@l
+                0x7D6B6214,                           # add   r11,r11,r12
+                0x819F0020,                           # lwz   r12,0x20(r31)
+                0x918B0000,                           # stw   r12,0(r11)
+                0x819F0024,                           # lwz   r12,0x24(r31)
+                0x918B0004]                           # stw   r12,4(r11)
     words = head + ['run:'] + restore + ['b body'] + ['skip:'] + wipe + restore + \
         [preimage, 'b back']
     labels, out = {}, []
@@ -217,27 +233,37 @@ def _words(path):
     return list(struct.unpack('>%dI' % (len(data) // 4), data))
 
 
-def compile_c(name, entry_symbol):
-    """Compile src/<name> to position-independent words; returns
-    (words, offset of entry_symbol). Refuses anything with relocations."""
+def compile_c(name, *symbols):
+    """Compile src/<name> at -Os into one position-independent blob; returns
+    (words, [offset of each symbol]). The object is linked on its own at
+    address 0 against libgcc so -Os's out-of-line register save/restore
+    helpers (_savegpr/_restgpr) land inside the blob; bl is PC-relative, so
+    the blob runs from anywhere. Anything but relative calls to those
+    helpers (i.e. any absolute address) is refused."""
     src = os.path.join(HERE, '..', 'src', name)
+    flags = ['-Os', '-mmultiple', '-mcpu=750', '-meabi', '-msoft-float', '-mno-sdata',
+             '-ffreestanding', '-fno-builtin', '-fno-common',
+             '-fno-asynchronous-unwind-tables', '-fno-exceptions']
     with tempfile.TemporaryDirectory() as tmp:
-        o, b = os.path.join(tmp, 'c.o'), os.path.join(tmp, 'c.bin')
-        subprocess.run([DEVKITPPC + 'powerpc-eabi-gcc', '-O2', '-mcpu=750', '-meabi',
-                        '-msoft-float', '-mno-sdata', '-ffreestanding', '-fno-builtin',
-                        '-fno-common', '-fno-asynchronous-unwind-tables', '-fno-exceptions',
-                        '-c', src, '-o', o], check=True)
+        o, elf, b = (os.path.join(tmp, x) for x in ('c.o', 'c.elf', 'c.bin'))
+        subprocess.run([DEVKITPPC + 'powerpc-eabi-gcc', *flags, '-c', src, '-o', o], check=True)
         relocs = subprocess.run([DEVKITPPC + 'powerpc-eabi-objdump', '-r', o],
                                 capture_output=True, text=True, check=True).stdout
-        if 'R_PPC' in relocs:
-            raise AssertionError(f'{name} must compile without relocations:\n' + relocs)
-        syms = subprocess.run([DEVKITPPC + 'powerpc-eabi-nm', o],
+        for line in relocs.splitlines():
+            f = line.split()
+            if len(f) == 3 and f[1].startswith('R_PPC'):
+                if f[1] != 'R_PPC_REL24' or not re.match(r'_(save|rest)gpr_\d+(_x)?$', f[2]):
+                    raise AssertionError(f'{name}: disallowed relocation {line.strip()}')
+        subprocess.run([DEVKITPPC + 'powerpc-eabi-gcc', *flags, '-nostdlib', '-nostartfiles',
+                        '-Wl,-Ttext=0', '-Wl,-e,0', o, '-lgcc',
+                        '-o', elf], check=True)
+        syms = subprocess.run([DEVKITPPC + 'powerpc-eabi-nm', elf],
                               capture_output=True, text=True, check=True).stdout
-        entry = int(next(l.split()[0] for l in syms.splitlines()
-                         if l.endswith(' ' + entry_symbol)), 16)
+        offsets = [int(next(l.split()[0] for l in syms.splitlines()
+                            if l.split()[-1] == sym), 16) for sym in symbols]
         subprocess.run([DEVKITPPC + 'powerpc-eabi-objcopy', '-O', 'binary',
-                        '-j', '.text', o, b], check=True)
-        return _words(b), entry
+                        '-j', '.text', elf, b], check=True)
+        return _words(b), offsets
 
 
 def cc_nunchuk_stub(at, target):
@@ -265,8 +291,8 @@ def cc_nunchuk_stub(at, target):
 
 
 def build_logger():
-    """Assemble the stub and compile src/gecko_log.c; returns
-    (stub_words, logger_words, gecko_log_offset)."""
+    """Assemble the call stub and compile src/gecko_log.c; returns
+    (stub_words, logger_words, gecko_log_offset, bl index, gecko_crash_offset)."""
     src = os.path.join(HERE, '..', 'src')
     with tempfile.TemporaryDirectory() as tmp:
         o, b = os.path.join(tmp, 's.o'), os.path.join(tmp, 's.bin')
@@ -274,24 +300,7 @@ def build_logger():
                         os.path.join(src, 'gecko_log_stub.s')], check=True)
         subprocess.run([DEVKITPPC + 'powerpc-eabi-objcopy', '-O', 'binary', o, b], check=True)
         stub = _words(b)
-        subprocess.run([DEVKITPPC + 'powerpc-eabi-gcc', '-O2', '-mcpu=750', '-meabi',
-                        '-msoft-float', '-mno-sdata', '-ffreestanding', '-fno-builtin',
-                        '-fno-common', '-fno-asynchronous-unwind-tables', '-fno-exceptions',
-                        '-c', os.path.join(src, 'gecko_log.c'), '-o', o],
-                       check=True)
-        relocs = subprocess.run([DEVKITPPC + 'powerpc-eabi-objdump', '-r', o],
-                                capture_output=True, text=True, check=True).stdout
-        if 'R_PPC' in relocs:
-            raise AssertionError('gecko_log.c must compile without relocations:\n' + relocs)
-        syms = subprocess.run([DEVKITPPC + 'powerpc-eabi-nm', o],
-                              capture_output=True, text=True, check=True).stdout
-        entry = int(next(l.split()[0] for l in syms.splitlines()
-                         if l.endswith(' gecko_log')), 16)
-        crash_entry = int(next(l.split()[0] for l in syms.splitlines()
-                               if l.endswith(' gecko_crash')), 16)
-        subprocess.run([DEVKITPPC + 'powerpc-eabi-objcopy', '-O', 'binary',
-                        '-j', '.text', o, b], check=True)
-        logger = _words(b)
+    logger, (entry, crash_entry) = compile_c('gecko_log.c', 'gecko_log', 'gecko_crash')
     bl = [i for i, w in enumerate(stub) if w == 0x48000001]
     assert len(bl) == 1, 'stub must contain exactly one `bl .` placeholder'
     return stub, logger, entry, bl[0], crash_entry
@@ -390,9 +399,12 @@ def repair_multiplayer(codeb):
             return i + ((off - 0x10000) if off & 0x8000 else off) // 4
         return None
     to_orig = [i for i, w in enumerate(words) if rel_target(i, w) == cave]
+    # cc_nunchuk.c now owns the left drum for GameCube pads as well, so the
+    # cave skips the stores unconditionally (kept as a cave so the branch
+    # retargeting below stays exercised and the body layout is stable).
     body = [0x881E005C,                    # lbz   r0,0x5c(r30)
             0x2C000002,                    # cmpwi r0,2
-            0x41820010] + stores + [0]     # beq   +0x10 (skip stores); b back
+            0x48000010] + stores + [0]     # b     +0x10 (skip stores); b back
     body[-1] = branch((cave + 6) * 4, 109 * 4)
     if len(body) % 2:
         body.append(0x60000000)
@@ -556,7 +568,7 @@ def inject(src, dst, log=False, log_only=False):
     got = struct.unpack('>I', d.read(CC_NUNCHUK_HOOK, 4))[0]
     if got != CC_NUNCHUK_PREIMAGE:
         raise AssertionError(f'CC->Nunchuk hook 0x{CC_NUNCHUK_HOOK:08X}: found 0x{got:08X}')
-    cc_words, cc_entry = compile_c('cc_nunchuk.c', 'cc_convert')
+    cc_words, (cc_entry,) = compile_c('cc_nunchuk.c', 'cc_convert')
     while len(blob) & 0x3:            # word alignment is all code needs
         blob.extend(struct.pack('>I', 0x60000000))
     cc_code = TEXT_ADDRESS + len(blob)
