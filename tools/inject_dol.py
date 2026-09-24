@@ -28,7 +28,8 @@ TEXT_ADDRESS = 0x80001820
 #   +0x18..+0x1B  codeE: per-channel "last KPAD sample was synthesised" flag
 #   +0x1C..+0x1F  gecko_log.c: channel-0 queued-sample / read counters
 #   +0x20..+0x23  codeA gate: per-channel Classic Controller warm-up counters
-SCRATCH_BYTES = 0x40
+#   +0x40..+0x4F  cc_nunchuk.c: per-channel left-drum stroke state
+SCRATCH_BYTES = 0x60
 # The section must end before the OS's low-memory globals at 0x80003000
 # (IPC, boot info, reset state); running into them blackscreens at boot.
 TEXT_LIMIT = 0x80003000
@@ -186,6 +187,11 @@ def hbm_gate(location, body_location, hook, preimage, cc_ok=False, cc_warmup=Fal
     return out
 
 
+# Right after the game's own KPADRead call: rewrite Classic Controller
+# entries in its status buffer as Wii Remote + Nunchuk (src/cc_nunchuk.c).
+CC_NUNCHUK_HOOK = 0x8003A788
+CC_NUNCHUK_PREIMAGE = 0x801E0054      # lwz r0,0x54(r30)
+
 LOG_HOOK = 0x80247ADC      # the logger stub runs first at KPADRead's entry
 # __OSUnhandledException(type, context, dsisr, dar): with --log, a stub here
 # sends the crash essentials over the Gecko before the OS's own dump, which
@@ -198,6 +204,53 @@ DEVKITPPC = os.environ.get('DEVKITPPC', '/opt/devkitpro/devkitPPC') + '/bin/'
 def _words(path):
     data = open(path, 'rb').read()
     return list(struct.unpack('>%dI' % (len(data) // 4), data))
+
+
+def compile_c(name, entry_symbol):
+    """Compile src/<name> to position-independent words; returns
+    (words, offset of entry_symbol). Refuses anything with relocations."""
+    src = os.path.join(HERE, '..', 'src', name)
+    with tempfile.TemporaryDirectory() as tmp:
+        o, b = os.path.join(tmp, 'c.o'), os.path.join(tmp, 'c.bin')
+        subprocess.run([DEVKITPPC + 'powerpc-eabi-gcc', '-O2', '-mcpu=750', '-meabi',
+                        '-msoft-float', '-mno-sdata', '-ffreestanding', '-fno-builtin',
+                        '-fno-common', '-fno-asynchronous-unwind-tables', '-fno-exceptions',
+                        '-c', src, '-o', o], check=True)
+        relocs = subprocess.run([DEVKITPPC + 'powerpc-eabi-objdump', '-r', o],
+                                capture_output=True, text=True, check=True).stdout
+        if 'R_PPC' in relocs:
+            raise AssertionError(f'{name} must compile without relocations:\n' + relocs)
+        syms = subprocess.run([DEVKITPPC + 'powerpc-eabi-nm', o],
+                              capture_output=True, text=True, check=True).stdout
+        entry = int(next(l.split()[0] for l in syms.splitlines()
+                         if l.endswith(' ' + entry_symbol)), 16)
+        subprocess.run([DEVKITPPC + 'powerpc-eabi-objcopy', '-O', 'binary',
+                        '-j', '.text', o, b], check=True)
+        return _words(b), entry
+
+
+def cc_nunchuk_stub(at, target):
+    """Call cc_convert(count=r3, entry=r29 + old_count*0x84, chan=r26) with
+    all volatile state preserved, then run the hooked instruction."""
+    save = [0x9421FF90, 0x90010008, 0x7C0802A6, 0x90010074]      # stwu -0x70; stw r0; mflr; stw lr
+    save += [0x90010000 | (r << 21) | (0x0C + 4 * (r - 3)) for r in range(3, 13)]
+    save += [0x7C000026, 0x90010040, 0x7C0902A6, 0x90010044,     # mfcr/stw, mfctr/stw
+             0x7C0102A6, 0x90010048]                             # mfxer/stw
+    args = [0x809E0054,                                          # lwz   r4,0x54(r30)
+            0x1C840084,                                          # mulli r4,r4,0x84
+            0x7C84EA14,                                          # add   r4,r4,r29
+            0x7F45D378]                                          # mr    r5,r26
+    call = [0]                                                   # bl    target
+    rest = [0x80010048, 0x7C0103A6, 0x80010044, 0x7C0903A6,      # xer, ctr
+            0x80010040, 0x7C0FF120]                              # cr
+    rest += [0x80010000 | (r << 21) | (0x0C + 4 * (r - 3)) for r in range(3, 13)]
+    rest += [0x80010074, 0x7C0803A6, 0x80010008, 0x38210070,     # lr, r0, pop
+             CC_NUNCHUK_PREIMAGE, 0]                             # original; b back
+    words = save + args + call + rest
+    i = len(save) + len(args)
+    words[i] = branch(at + i * 4, target) | 1
+    words[-1] = branch(at + (len(words) - 1) * 4, CC_NUNCHUK_HOOK + 4)
+    return words
 
 
 def build_logger():
@@ -416,7 +469,7 @@ def inject(src, dst, log=False, log_only=False):
     blob = bytearray(SCRATCH_BYTES)
     locations = {}
     for hook in HOOK_ORDER:
-        while len(blob) & 0x1F:
+        while len(blob) & 0x3:            # word alignment is all code needs
             blob.extend(struct.pack('>I', 0x60000000))
         entry = TEXT_ADDRESS + len(blob)
         if log and hook == LOG_HOOK:
@@ -439,18 +492,33 @@ def inject(src, dst, log=False, log_only=False):
         locations[hook] = entry
         blob.extend(struct.pack('>%dI' % len(words), *words))
 
+    got = struct.unpack('>I', d.read(CC_NUNCHUK_HOOK, 4))[0]
+    if got != CC_NUNCHUK_PREIMAGE:
+        raise AssertionError(f'CC->Nunchuk hook 0x{CC_NUNCHUK_HOOK:08X}: found 0x{got:08X}')
+    cc_words, cc_entry = compile_c('cc_nunchuk.c', 'cc_convert')
+    while len(blob) & 0x3:            # word alignment is all code needs
+        blob.extend(struct.pack('>I', 0x60000000))
+    cc_code = TEXT_ADDRESS + len(blob)
+    blob.extend(struct.pack('>%dI' % len(cc_words), *cc_words))
+    while len(blob) & 0x3:            # word alignment is all code needs
+        blob.extend(struct.pack('>I', 0x60000000))
+    cc_stub = TEXT_ADDRESS + len(blob)
+    words = cc_nunchuk_stub(cc_stub, cc_code + cc_entry)
+    blob.extend(struct.pack('>%dI' % len(words), *words))
+    locations[CC_NUNCHUK_HOOK] = cc_stub
+
     if log:
         got = struct.unpack('>I', d.read(CRASH_HOOK, 4))[0]
         if got != CRASH_PREIMAGE:
             raise AssertionError(f'crash hook 0x{CRASH_HOOK:08X}: found 0x{got:08X}')
-        while len(blob) & 0x1F:
+        while len(blob) & 0x3:            # word alignment is all code needs
             blob.extend(struct.pack('>I', 0x60000000))
         crash_at = TEXT_ADDRESS + len(blob)
         words = stub + [CRASH_PREIMAGE, 0]
         words[-1] = branch(crash_at + (len(words) - 1) * 4, CRASH_HOOK + 4)
         crash_bl = len(blob) // 4 + bl_idx
         blob.extend(struct.pack('>%dI' % len(words), *words))
-        while len(blob) & 0x1F:
+        while len(blob) & 0x3:            # word alignment is all code needs
             blob.extend(struct.pack('>I', 0x60000000))
         logger_at = TEXT_ADDRESS + len(blob)
         blob.extend(struct.pack('>%dI' % len(logger), *logger))
@@ -480,7 +548,7 @@ def _inject_log_only(d, dst):
     words = stub + [HOOK_PREIMAGE[LOG_HOOK], 0]
     words[-1] = branch(stub_at + (len(words) - 1) * 4, LOG_HOOK + 4)
     blob.extend(struct.pack('>%dI' % len(words), *words))
-    while len(blob) & 0x1F:
+    while len(blob) & 0x3:            # word alignment is all code needs
         blob.extend(struct.pack('>I', 0x60000000))
     logger_at = TEXT_ADDRESS + len(blob)
     blob.extend(struct.pack('>%dI' % len(logger), *logger))

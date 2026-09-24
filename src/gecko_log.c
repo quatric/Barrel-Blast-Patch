@@ -5,9 +5,7 @@
  * to it directly (the same EXI exchange libogc's usbgecko.c uses) and
  * prints one line of SI state at most every ~0.2 s:
  *
- *   T<tb> B<busy> P<si.poll shadow> t<type0>,<type1>,<type2>,<type3>
- *     S<SISR> L<SIPOLL> C<SICOMCSR> I<C0INBUFH>,<C0INBUFL>
- *     H<CHomeButtonMenu vtable word>,<open flag word> X<ch0 pointer x>,<y>
+ *   B<busy> t<type0>,<type1>,<type2>,<type3> S<SISR> L<SIPOLL> I<C0INBUFH>
  *     K<ch0 hold>,<ch0 dev_type/wpad_err/dpd_valid/format>
  *      <ch1 hold>,<ch1 dev_type/...>  (KPADStatus words +0x00 and +0x5C)
  *     Q<samples queued on channel 0>/<channel-0 reads> since the last line
@@ -81,9 +79,7 @@ void gecko_log(u32 chan)                /* r3 = KPADRead's channel */
     if (exchange(0x90000000) != 0x04700000)   /* USB Gecko ID check */
         return;
 
-    field('T', tb);
     field('B', REG(0x80331538));        /* si:: busy flag, -1 idle */
-    field('P', REG(0x8033153C));        /* si:: SIPOLL shadow */
     put('t');
     for (i = 0; i < 4; i++) {
         hex(REG(0x80331550 + i * 4));   /* si:: cached type */
@@ -91,21 +87,8 @@ void gecko_log(u32 chan)                /* r3 = KPADRead's channel */
     }
     field('S', REG(0xCD006438));
     field('L', REG(0xCD006430));
-    field('C', REG(0xCD006434));
     put('I');
     hex(REG(0xCD006404));
-    put(',');
-    hex(REG(0xCD006408));
-    put(' ');
-    put('H');
-    hex(REG(0x80531B80));               /* expect 802E7288 */
-    put(',');
-    hex(REG(0x80531BB0));               /* open flag is the byte at +0x32 */
-    put(' ');
-    put('X');
-    hex(REG(0x803C91C0 + 0x20));        /* KPAD ch0 pointer position */
-    put(',');
-    hex(REG(0x803C91C0 + 0x24));
     put(' ');
     put('K');
     for (i = 0; i < 2; i++) {
@@ -156,19 +139,4 @@ void gecko_crash(u32 type, u32 *ctx, u32 dsisr, u32 dar)
         sp = ((u32 *)sp)[0];            /* back chain */
     }
     put('\r'); put('\n');
-    for (i = 0; i < 32; i++) {          /* all GPRs, 8 per line */
-        hex(ctx[i]);
-        put((i & 7) == 7 ? '\n' : ' ');
-    }
-    /* The words around SRR0 as memory holds them now -- an illegal
-     * instruction at an address that holds valid code means something
-     * overwrote it. */
-    sp = ctx[0x198 / 4] & ~0x1F;
-    if (sp >= 0x80000000 && sp < 0x81800000) {
-        put('M'); put(' '); hex(sp); put('\n');
-        for (i = 0; i < 16; i++) {
-            hex(((u32 *)sp)[i]);
-            put((i & 7) == 7 ? '\n' : ' ');
-        }
-    }
 }
