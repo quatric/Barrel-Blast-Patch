@@ -17,7 +17,7 @@ Tested on a real Wii with a USB loader.
 - GameCube pad and DK Bongos: left/right drums, both-drums jump, steering,
   menus
 - presses registering reliably, and unplugging/replugging a GameCube pad
-  mid-race
+  at the title screen or in menus
 - a GameCube pad driving a player that has no Wii Remote (players 1 and 2)
 - Classic Controller: buttons, pointer, left and right drums
 - the HOME Menu (Wii Remote or Classic Controller), with no accidental HOME
@@ -28,6 +28,8 @@ Tested on a real Wii with a USB loader.
 - player 1's pointer may not respond until the HOME Menu has been opened once
 - player 2 occasionally misses a shake
 - on a Classic Controller, ZL also counts as a left-drum hit
+- a GameCube pad unplugged and replugged mid-race doesn't come back until
+  you're back at a menu
 - relaunching the game without powering the console off can leave GameCube
   pads unresponsive — power-cycle between sessions
 - players 3 and 4 are untested
