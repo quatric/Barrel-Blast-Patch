@@ -10,6 +10,7 @@
  *     H<CHomeButtonMenu vtable word>,<open flag word> X<ch0 pointer x>,<y>
  *     K<ch0 hold>,<ch0 dev_type/wpad_err/dpd_valid/format>
  *      <ch1 hold>,<ch1 dev_type/...>  (KPADStatus words +0x00 and +0x5C)
+ *     Q<samples queued on channel 0>/<channel-0 reads> since the last line
  *
  * Called from a hook stub at KPADRead's entry. Position independent: no
  * globals, only fixed hardware/game addresses; the rate-limit stamp lives
@@ -23,6 +24,8 @@ typedef unsigned int u32;
 #define EXI1_CR     REG(0xCD006820)
 #define EXI1_DATA   REG(0xCD006824)
 #define STAMP       REG(0x80001830)     /* scratch word 4 (poller uses 0-3) */
+#define Q_SAMPLES   (*(volatile unsigned short *)0x8000183C)  /* scratch +0x1C */
+#define Q_READS     (*(volatile unsigned short *)0x8000183E)  /* scratch +0x1E */
 
 static __attribute__((noinline)) u32 exchange(u32 v)
 {
@@ -59,9 +62,16 @@ static __attribute__((noinline)) void field(u32 tag, u32 v)
     put(' ');
 }
 
-void gecko_log(void)
+void gecko_log(u32 chan)                /* r3 = KPADRead's channel */
 {
     u32 tb, i;
+
+    /* How many samples a real Wii Remote queues per read, averaged by
+     * the reader: channel 0's queued count (+0x10F) at KPADRead entry. */
+    if (chan == 0) {
+        Q_SAMPLES += *(volatile unsigned char *)(0x803C91C0 + 0x10F);
+        Q_READS += 1;
+    }
 
     __asm__ volatile ("mftb %0" : "=r"(tb));
     if (tb - STAMP < 12150000)          /* 0.2 s at 60.75 MHz */
@@ -103,8 +113,13 @@ void gecko_log(void)
         hex(REG(k));
         put(',');
         hex(REG(k + 0x5C));
-        put(i ? '\r' : ' ');
+        put(' ');
     }
+    put('Q');
+    hex(((u32)Q_SAMPLES << 16) | Q_READS);
+    Q_SAMPLES = 0;
+    Q_READS = 0;
+    put('\r');
     put('\n');
 }
 

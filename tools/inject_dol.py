@@ -26,7 +26,9 @@ TEXT_ADDRESS = 0x80001820
 #   +0x10         gecko_log.c: last log line time base
 #   +0x14..+0x17  SI poller: per-channel consecutive-NOREP counters
 #   +0x18..+0x1B  codeE: per-channel "last KPAD sample was synthesised" flag
-SCRATCH_BYTES = 0x20
+#   +0x1C..+0x1F  gecko_log.c: channel-0 queued-sample / read counters
+#   +0x20..+0x23  codeA gate: per-channel Classic Controller warm-up counters
+SCRATCH_BYTES = 0x40
 # The section must end before the OS's low-memory globals at 0x80003000
 # (IPC, boot info, reset state); running into them blackscreens at boot.
 TEXT_LIMIT = 0x80003000
@@ -45,6 +47,11 @@ HBM_GATED = (0x80248090, 0x80246588, 0x8024791C, 0x80247500, 0x80247BE0, 0x80247
 # Buttons and pointer keep running for a Classic Controller channel (r31 is
 # the KPAD base at both hook sites), so it can drive the HOME Menu.
 HBM_CC_PASS = (0x80248090, 0x80247500)
+# Button hook: skipped for a moment after a Classic Controller is attached
+# (it reports every button, HOME included, while it initialises).
+CC_WARMUP_HOOK = 0x80248090
+CC_WARMUP = TEXT_ADDRESS + 0x20      # 4 per-channel counters in the scratch
+CC_WARMUP_READS = 30                 # ~0.5 s at one read per frame
 HBM_OBJECT = 0x80531B80
 HBM_VTABLE = 0x802E7288
 HBM_OPEN_FLAG = HBM_OBJECT + 0x32
@@ -92,7 +99,7 @@ def branch(src, dst):
     return 0x48000000 | (off & 0x03FFFFFC)
 
 
-def hbm_gate(location, body_location, hook, preimage, cc_ok=False):
+def hbm_gate(location, body_location, hook, preimage, cc_ok=False, cc_warmup=False):
     """Stub: if the HOME Menu is open, run the original instruction and
     return to the game; otherwise fall through to the hook body. With
     cc_ok (hooks where r31 is the KPAD channel base), a channel whose
@@ -106,6 +113,30 @@ def hbm_gate(location, body_location, hook, preimage, cc_ok=False):
         0x9181000C,                                   # stw   r12,0xc(r1)
         0x7D800026,                                   # mfcr  r12
         0x91810004,                                   # stw   r12,4(r1)
+    ]
+    if cc_warmup:
+        # A Classic Controller reports garbage (HOME included) for a moment
+        # after it's plugged in. Skip this hook for CC_WARMUP_READS reads
+        # after the channel's dev_type (r31+0x5C) becomes 2. r27 = channel.
+        head += [
+            0x3D600000 | (CC_WARMUP >> 16),           # lis   r11,warm@h
+            0x616B0000 | (CC_WARMUP & 0xFFFF),        # ori   r11,r11,warm@l
+            0x7D6BDA14,                               # add   r11,r11,r27
+            0x899F005C,                               # lbz   r12,0x5c(r31)
+            0x2C0C0002,                               # cmpwi r12,2
+            'bne notcc',
+            0x898B0000,                               # lbz   r12,0(r11)
+            0x280C0000 | CC_WARMUP_READS,             # cmplwi r12,N
+            'bge warmdone',
+            0x398C0001,                               # addi  r12,r12,1
+            0x998B0000,                               # stb   r12,0(r11)
+            'b skip',
+            'notcc:',
+            0x39800000,                               # li    r12,0
+            0x998B0000,                               # stb   r12,0(r11)
+            'warmdone:',
+        ]
+    head += [
         0x3D600000 | hi(HBM_OBJECT),                  # lis   r11,obj@ha
         0x818B0000 | lo(HBM_OBJECT),                  # lwz   r12,obj@l(r11)
         0x3D600000 | (HBM_VTABLE >> 16),              # lis   r11,vt@h
@@ -149,7 +180,8 @@ def hbm_gate(location, body_location, hook, preimage, cc_ok=False):
             out[i] = branch(pc, hook + 4)
         else:
             off = (labels[target] - i) * 4
-            base = {'b': 0x48000000, 'beq': 0x41820000, 'bne': 0x40820000}[op]
+            base = {'b': 0x48000000, 'beq': 0x41820000, 'bne': 0x40820000,
+                    'bge': 0x40800000}[op]
             out[i] = base | (off & (0x03FFFFFC if op == 'b' else 0xFFFC))
     return out
 
@@ -295,6 +327,18 @@ def repair_multiplayer(codeb):
     return words
 
 
+def repair_stick(codec):
+    """codeC's channel detect had the same `ori` for `addi` bug: channel 1's
+    base+0x60 came out 0x803C9220 | 0x524 = 0x803C9724 instead of 0x803C9744,
+    so the stick hook never matched player 2 (Classic or GameCube)."""
+    words = list(codec)
+    hits = [i for i, w in enumerate(words) if w == 0x60C60524]
+    if len(hits) != 1:
+        raise AssertionError(f'unexpected codeC channel-1 base words: {hits}')
+    words[hits[0]] = 0x38C60524       # addi r6,r6,0x524
+    return words
+
+
 def repair_pointer(coded):
     """Keep Classic Controller IR reads away from the left-drum vector."""
     words = list(coded)
@@ -341,6 +385,7 @@ def inject(src, dst, log=False, log_only=False):
     bodies = parse_gecko_ini()
     bodies[0x80246588] = repair_multiplayer(bodies[0x80246588])
     bodies[0x80247500] = repair_pointer(bodies[0x80247500])
+    bodies[0x8024791C] = repair_stick(bodies[0x8024791C])
 
     order = [] if log_only else HOOK_ORDER
     for hook in order or [LOG_HOOK]:
@@ -380,9 +425,10 @@ def inject(src, dst, log=False, log_only=False):
             blob.extend(struct.pack('>%dI' % len(stub), *stub))
         if hook in HBM_GATED:
             cc_ok = hook in HBM_CC_PASS
-            gate_len = len(hbm_gate(entry, entry, hook, HOOK_PREIMAGE[hook], cc_ok)) * 4
+            warm = hook == CC_WARMUP_HOOK
+            gate_len = len(hbm_gate(entry, entry, hook, HOOK_PREIMAGE[hook], cc_ok, warm)) * 4
             body_location = entry + gate_len
-            gate = hbm_gate(entry, body_location, hook, HOOK_PREIMAGE[hook], cc_ok)
+            gate = hbm_gate(entry, body_location, hook, HOOK_PREIMAGE[hook], cc_ok, warm)
             blob.extend(struct.pack('>%dI' % len(gate), *gate))
         location = TEXT_ADDRESS + len(blob)
         words = list(bodies[hook])
