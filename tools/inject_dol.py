@@ -62,10 +62,7 @@ HOOK_ORDER = [
     0x80247ADC,  # SI poller
     0x80248090,  # buttons
     0x80246588,  # acceleration / drums
-    # 0x8024791C (codeC, stick) is no longer injected: cc_nunchuk.c sets the
-    # Nunchuk stick for GameCube and Classic players in the game's copy of
-    # each status, which overrode everything codeC wrote. repair_stick()
-    # stays so the body is still checked if it's ever re-enabled.
+    0x8024791C,  # stick
     0x80247500,  # IR pointer
     0x80247BE0,  # synthetic KPAD sample
     0x80247FA8,  # neutralize Wii Remote motion while a pad/CC is active
@@ -399,12 +396,9 @@ def repair_multiplayer(codeb):
             return i + ((off - 0x10000) if off & 0x8000 else off) // 4
         return None
     to_orig = [i for i, w in enumerate(words) if rel_target(i, w) == cave]
-    # cc_nunchuk.c now owns the left drum for GameCube pads as well, so the
-    # cave skips the stores unconditionally (kept as a cave so the branch
-    # retargeting below stays exercised and the body layout is stable).
     body = [0x881E005C,                    # lbz   r0,0x5c(r30)
             0x2C000002,                    # cmpwi r0,2
-            0x48000010] + stores + [0]     # b     +0x10 (skip stores); b back
+            0x41820010] + stores + [0]     # beq   +0x10 (skip stores); b back
     body[-1] = branch((cave + 6) * 4, 109 * 4)
     if len(body) % 2:
         body.append(0x60000000)

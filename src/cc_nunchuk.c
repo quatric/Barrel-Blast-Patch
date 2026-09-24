@@ -18,11 +18,7 @@
  *     10.0 into the Nunchuk acc_value/acc_speed fields),
  *   - reports dev_type 1 (Nunchuk).
  *
- * A GameCube pad on the channel gets the same treatment from its SI input:
- * left drum = X / L / Z or analog L past 40 (DK Bongos: Z/R swapped, as
- * codeB does), Nunchuk stick = C-stick (+-16 deadzone, /100).
- *
- * Classic left drum = X / L, ZR (the both-drums jump, as the GameCube pad's Z), or
+ * Left drum = X / L, ZR (the both-drums jump, as the GameCube pad's Z), or
  * the analog L trigger past ~40/255. ZL does nothing. The right drum already works
  * through the Wii Remote motion path (codeB), and the pointer, button
  * mapping and HOME Menu handling ran earlier on KPAD's own status.
@@ -64,25 +60,6 @@ typedef unsigned char u8;
 #define F_10          0x41200000        /* 10.0f */
 #define F_M10         0xC1200000        /* -10.0f */
 
-/* int -> float bits without FP instructions (-msoft-float): v / 100,
- * clamped to [-1, 1]. */
-static u32 stick_float(int v)
-{
-    u32 sign = 0, m, e;
-
-    if (v < 0) { sign = 0x80000000; v = -v; }
-    if (v >= 100) return sign | 0x3F800000;          /* 1.0 */
-    if (v == 0) return 0;
-    /* value = v/100: build it as (v * 2^24 / 100) scaled by 2^-24 */
-    m = ((u32)v << 24) / 100;                       /* fixed point, 24 frac bits */
-    e = 127;
-    while (!(m & 0x01000000)) { m <<= 1; e--; }     /* normalise to 1.xxx */
-    return sign | (e << 23) | (m & 0x007FFFFF);
-}
-
-#define SI_INBUFH(c)  (*(volatile u32 *)(0xCD006404 + (c) * 12))
-#define SI_INBUFL(c)  (*(volatile u32 *)(0xCD006408 + (c) * 12))
-
 void cc_convert(u32 count, u8 *entry, u32 chan)
 {
     volatile u8 *st;
@@ -95,32 +72,14 @@ void cc_convert(u32 count, u8 *entry, u32 chan)
     for (i = 0; i < count; i++, entry += KPAD_SIZE) {
         u32 buttons, lx, ly, press;
 
-        if (B(entry, DEV_TYPE) == 2) {
-            buttons = W(entry, CL_HOLD);
-            lx = W(entry, CL_RSTICK_X);
-            ly = W(entry, CL_RSTICK_Y);
-            press = (buttons & LEFT_BUTTONS) ||
-                    (!(W(entry, CL_TRIG_L) & 0x80000000) && W(entry, CL_TRIG_L) > TRIG_ON);
-        } else {
-            /* A GameCube pad on this channel: same treatment, so its left
-             * drum and C-stick movement match the Classic Controller's. */
-            u32 hi = SI_INBUFH(chan), lo = SI_INBUFL(chan), b;
-            int cx, cy;
-            if ((hi & 0x80000000) || !(hi & 0x00800000))
-                continue;                               /* no pad */
-            b = hi >> 16;
-            if (!(lo & 0xFCFCFCFC) && !(hi & 0xFCFC)) { /* DK Bongos: swap Z/R */
-                u32 z = b & 0x0010, r = b & 0x0020;
-                b = (b & ~0x0030) | (z << 1) | (r >> 1);
-            }
-            press = (b & 0x0450) || ((lo >> 8) & 0xFF) > 40;   /* X, L, Z; analog L */
-            cx = (int)(lo >> 24) - 128;                         /* C-stick */
-            cy = (int)((lo >> 16) & 0xFF) - 128;
-            if (cx > -16 && cx < 16) cx = 0;
-            if (cy > -16 && cy < 16) cy = 0;
-            lx = stick_float(cx);
-            ly = stick_float(cy);
-        }
+        if (B(entry, DEV_TYPE) != 2)
+            continue;
+
+        buttons = W(entry, CL_HOLD);
+        lx = W(entry, CL_RSTICK_X);
+        ly = W(entry, CL_RSTICK_Y);
+        press = (buttons & LEFT_BUTTONS) ||
+                (!(W(entry, CL_TRIG_L) & 0x80000000) && W(entry, CL_TRIG_L) > TRIG_ON);
 
         if (press && !st[0])
             st[1] = 6;                  /* new press: start a stroke */
