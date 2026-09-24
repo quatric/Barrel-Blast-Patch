@@ -73,9 +73,12 @@ dev_ok:
     addi    5, 5, 0x6404
     lwzx    5, 4, 5             # INBUFH
     andis.  0, 5, 0x8000
-    bne     done                # ERRSTAT: nothing on this port
+    bne     out                 # ERRSTAT: nothing on this port
     andis.  0, 5, 0x0080
-    beq     done                # no valid GameCube response
+    beq     out                 # no valid GameCube response
+    # (both keep the flag: with no Wii Remote nothing refreshes dev_type,
+    # so it stays at our own 1 while the pad is unplugged, and clearing
+    # the flag there made codeE refuse the pad for good once it came back)
 
     lbz     4, 0x10e(31)        # write index (may be 0x10: wraps on read)
     lbz     3, 0x10f(31)        # queued sample count
@@ -86,7 +89,20 @@ dev_ok:
     # delivers 2-3 samples per read (USB Gecko log), and the drum logic in
     # read_kpad_acc runs once per sample, so a single synthesised sample made
     # a remote-less player far less responsive than one with a real remote.
+    # 3,3,3,4 samples per read = 3.25 on average, what a real Wii Remote
+    # queued in the USB Gecko log (39 samples / 12 reads). The flag byte
+    # doubles as the 1..4 cycle position (nonzero = our samples).
+    lbz     3, 0(7)
+    addi    3, 3, 1
+    cmplwi  3, 4
+    ble     cyc_ok
+    li      3, 1
+cyc_ok:
+    stb     3, 0(7)
     li      0, 3                # samples to publish (r0 is dead at this hook)
+    cmplwi  3, 4
+    bne     synth_loop
+    li      0, 4
 synth_loop:
     cmplwi  4, 0x10
     blt     index_ok
@@ -110,10 +126,13 @@ zero_loop:
     bne     synth_loop
 
     stb     4, 0x10e(31)        # advance write index (wraps on next read)
+    lbz     6, 0(7)
+    cmplwi  6, 4
     li      6, 3
-    stb     6, 0x10f(31)        # publish three samples
-    li      6, 1
-    stb     6, 0(7)             # remember they were ours
+    bne     pub
+    li      6, 4
+pub:
+    stb     6, 0x10f(31)        # publish the samples (flag already set)
     b       out
 
     # Real samples queued with no extension: mark the newest `count` entries,
@@ -143,8 +162,12 @@ mark:
     stb     6, 0x28(5)          # extension valid
     li      6, 0
     stb     6, 0x29(5)          # no extension error
-    li      6, 4
-    stb     6, 0x36(5)          # device type: Nunchuk-class
+    li      6, 5
+    stb     6, 0x36(5)          # data format 5: read_kpad_acc's Wii Remote
+                                # and Nunchuk blocks both accept it, and so
+                                # does the IR routine (2/5/8) -- with 4 the
+                                # IR routine skipped the sample and codeD
+                                # never drew a remote-less player's pointer
     blr
 
 done:
