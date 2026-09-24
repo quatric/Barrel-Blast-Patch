@@ -1,0 +1,649 @@
+# Technical notes
+
+Implementation details, reverse-engineering notes and the investigation log
+behind the patch. For installing and playing, see the [README](../README.md).
+
+## Sources
+
+`src/` holds the PowerPC assembly and a `build.py` that turns it into Gecko
+codes — but **it does not build the codeA-D codes shipped here**. It is a
+later revision in which GameCube detection regressed, and it is included only
+because the sources for the working build were lost. Read
+[`src/README.md`](../src/README.md) before touching it.
+
+`tools/build.py` is unrelated to `src/build.py` (same filename, different
+directory, different purpose): it's where the fifth code — the SI poller
+described below — is defined, both as Gecko code text and as a direct
+`main.dol` patch. `codeA`-`codeD` are hand-maintained in `codes/RDKE01.ini`
+directly (see the caveat above); only the poller is generated.
+
+## How it works
+
+Everything below refers to the USA `main.dol`.
+
+### KPAD injection points
+
+The game links an older Wii SDK where the button state is composed inside
+`KPADiRead` itself:
+
+| Hook | Address | Notes |
+| --- | --- | --- |
+| Button compose | `0x80248090` | `andi. r0, r7, 0x9fff`; `r7` = Wii Remote buttons, `r27` = channel. Both the Classic Controller remap and the GameCube button injection run here. |
+| Nunchuk stick read | return `0x8024791c` | `r30` = channel base + 0x60; `r12` holds a converter pointer that **must** be preserved |
+| Accelerometer read | return `0x80246588` | `r30` = channel base |
+| DPD / IR read | `0x802470c0`, epilogue hook `0x80247500` | |
+
+Player 1's KPAD channel base is `0x803C91C0`, with a `0x524` stride per player.
+Persistent state for the drum edge-trigger state machines is kept at offset
+`0x100` of the *active* channel's KPAD struct — offsets `0x100`–`0x110` are unused
+by every Wii Remote extension (they all end at `0xC0`), so per-player state can
+never clobber another player or fake a button press.
+
+### Reading the GameCube controller
+
+The Serial Interface on Wii/Hollywood is at **`0xCD006400`**, not `0xCC006400`
+(that's the GameCube/Flipper address). Dolphin mirrors `0xCC` ↔ `0xCD`, which is
+why an earlier revision of these codes worked in the emulator and did nothing at
+all on console. The correct base is confirmed by the game's own linked SDK —
+`SISetXY`, `__SITransfer` (`0x801f48ec`) and `SIInterruptHandler` (`0x801f4440`)
+all use `0xCD006400`.
+
+Relevant registers: `SIPOLL 0x6430`, `SICOMCSR 0x6434`, `SISR 0x6438`, channel 0
+`INBUFH 0x6404` / `INBUFL 0x6408` (channel stride `0xC`), I/O buffer `0x6480`.
+
+The second half of the console problem is that *nothing polls*. Barrel Blast links
+the full `si::` library (`SIInit` runs at boot from `OSInit`) but **not** the `PAD`
+library — there is no `PADInit`/`PADRead`, and auto-polling is never enabled. On
+real hardware `INBUFH` therefore stays empty forever, the validity bit fails, and
+injection is skipped. Dolphin hides this because it fills `INBUFH` itself in
+`UpdateDevices()`.
+
+The four `C2` codes only ever *read* `INBUFH`/`INBUFL`. Under Dolphin that's
+enough, because the emulator fills those registers itself whenever software
+writes to them. On real hardware it is not: **`SIC0INBUFH`/`SIC0INBUFL` are
+hardware-written auto-poll result registers. Writes to them from software are
+silently ignored on real silicon.** An earlier version of the fifth code tried
+exactly that (copy the I/O buffer response into `INBUFH`/`INBUFL` by hand) —
+it's a no-op on console, which is why "works in Dolphin, does nothing on
+hardware" was the exact symptom this project got stuck on. Dolphin doesn't
+model that restriction, so the divergence only ever showed up on real
+hardware.
+
+The fifth code included here (`build.py`'s `autopoll` variant, hooking
+`KPADiRead`'s entry at `0x80247ADC`, which runs once per channel per frame
+before all three read hooks since they're `bl`-called from inside it) takes
+the other path instead — it drives the SI hardware's own auto-polling logic
+so the console fills `INBUFH`/`INBUFL` itself, the same way `PADRead` would if
+this game linked the `PAD` library:
+
+1. Acknowledge every channel's latched error status in `SISR` (`0x6438`) —
+   see "Hot-plugging" below.
+2. Write poll command `0x00400300` to each channel's output buffer
+   (`SIC0OUTBUF` `0x6400`, stride `0xC`).
+3. Read `SIPOLL` (`0x6430`); `SIInit` already programmed the X (rate) field,
+   so this only needs to force the Y field to 1 poll/frame if it's unset.
+4. OR in the enable and copy-on-vblank bits for all four channels (`0xFF`)
+   and write it back to `SIPOLL`.
+
+That's it — no `SICOMCSR` kick, no `TSTART` polling, no interrupt handling.
+The hardware's own auto-poll state machine (the same one `SIInit`/`SIProbe`
+already exercise for the boot-time `SIGetType` probes) takes it from there
+every VBlank.
+
+`SIPOLL`'s low byte is the per-channel control: bits 7–4 are the poll enable
+for channels 0–3, bits 3–0 the matching copy-on-vblank bits. `SISetXY`
+(`0x801f4a9c`) rewrites only X and Y and preserves that byte, so nothing in
+the game ever clears what the poller sets.
+
+#### Hot-plugging
+
+Each channel gets a byte of `SISR` (`0x6438`), channel 0 in the high byte.
+The low nibble of each byte is the latched error status — `NOREP`, `COLL`,
+`OVRUN`, `UNRUN` — and it is **write-1-to-clear**; bits 5 and 4 above it are
+the read-only `RDST`/`WRST` status. Unplugging a controller latches `NOREP`,
+and until something acknowledges it, `ERRSTAT` stays set in `INBUFH`, every
+hook's error check skips injection, and replugging the pad never brings it
+back.
+
+The poller therefore acknowledges the error nibbles every frame before it
+re-arms polling: read `SISR`, mask to `0x0F0F0F0F`, write it back. That's the
+game's own SI library idiom — `SIInterruptHandler` does it a channel at a
+time at `0x801f4574`–`0x801f458c` (`lis 0x0F00`, `sraw` by `chan*8`, `and`,
+store back). Writing a 0 to a write-1-to-clear bit leaves it alone, so
+masking to one channel's nibble is how the SDK avoids acknowledging another
+channel's error by accident; the poller masks to all four because it polls
+all four.
+
+A second variant (`build.py`'s `stash`) is included as a fallback in case the
+`SIPOLL` enable-bit assumption above turns out wrong on real hardware: it
+issues one SI immediate transfer per frame and stashes the response — read
+from the I/O buffer at `0xCD006480`, which Dolphin and real hardware
+implement identically for immediate transfers — into unused RAM (codeD's own
+leading pad words) instead of trying to write `INBUFH`/`INBUFL`, then
+repoints the four read hooks there. See `tools/gui.py` to try either one.
+
+### Synthesising a sample
+
+Reading the GameCube pad is only half the problem: the four injection hooks
+all live inside `KPADiRead`, and `KPADiRead` gives up before any of them run
+when the channel has no Wii Remote data queued. The check is at
+`0x80247BE0` — `lbz r0,0x10f(r31)` on the channel's sample count, then a
+branch straight to the function's exit if it's zero. No Wii Remote, no
+samples, no hooks, nothing to inject into. That, not the extension checks,
+is why a Wii Remote had to be connected even though every input was coming
+from the GameCube port.
+
+`codeE` hooks that exact instruction, so it runs with the channel's KPAD
+base already in `r31` and the channel index in `r27`, and fabricates a
+sample when there is none. The ring it writes into is the same one the
+game's own WPAD callback fills at `0x802485C8`: 16 entries of `0x38` bytes
+at KPAD `+0x110`, next-write index at `+0x10E`, count at `+0x10F`, with the
+index wrapped at read time rather than on increment.
+
+The sample is zeroed, because `codeA`–`codeD` overwrite the buttons, motion
+vectors and stick from Serial Interface state further down anyway. Three
+bytes are not zeroed, because they decide whether the rest of KPAD will
+look at the sample at all:
+
+| Offset | Value | Checked at |
+| --- | --- | --- |
+| `+0x28` | `1` — extension valid | `0x802462C8` |
+| `+0x29` | `0` — no extension error | `0x802462BC` |
+| `+0x36` | `4` — device type | `0x802462D4` |
+
+`4` is the useful device type because it satisfies both halves of
+`read_kpad_acc`: the Wii Remote accelerometer block accepts `1`, `2`, `4`,
+`5`, `7` and `8`, while the Nunchuk block — where the left drum's motion
+vector is read — accepts only `4` and `5`.
+
+`codeE` does nothing at all unless the channel has a valid, error-free
+GameCube response on SI *and* the sample count is zero, so a connected Wii
+Remote always wins and nothing about the existing behaviour changes. Build
+with `--no-sample` to leave it out.
+
+### Input decoding
+
+`INBUFH` for a valid GameCube response:
+
+```
+byte0 = [ERRSTAT, 1, 0, Start, Y, X, B, A]
+byte1 = [1, L, R, Z, DUp, DDown, DRight, DLeft]
+byte2 = Stick X (0-255, centre 128)
+byte3 = Stick Y
+```
+
+Byte 1 bit 7 (`INBUFH` bit 23) is always 1 in a valid response, so
+`andis. r0, rX, 0x0080` is used as a presence check — when a pad is unplugged or
+mid-hot-plug the whole word reads 0, the check fails, and injection is skipped so
+the real Wii Remote takes over cleanly.
+
+### Faking the motion
+
+Barrel Blast does not look at absolute accelerometer magnitude — it looks at
+**frame-to-frame deltas** across the three axes. A static injected vector reads as
+"no motion". Each drum therefore oscillates its axis between `+10.0f` and
+`-10.0f` every frame while active, which produces a delta far above the game's
+shake threshold.
+
+Drum hits are edge-triggered: a released→pressed transition arms a 4-frame
+oscillation and then stops until the button is released again. Without this the
+game reads a continuous shake and the karts accelerate without limit; with it you
+have to physically alternate L/R hits to build speed, exactly like real bongos.
+
+Jump is the exception. It is **angle**-based, not magnitude-based (parameters
+`nBuraJumpAngleWM` / `L` / `R`, cached at config `+0x2C8` / `+0x2C0` / `+0x2C4`),
+so faking it needs a genuine upward acceleration *vector* across `+0x0c/+0x10/+0x14`
+and `+0x68/+0x6c/+0x70`. The current values are a placeholder — this is the main
+piece of unfinished work.
+
+All three hooks allocate proper stack frames and save/restore the volatile
+registers (`r0`, `r3`–`r12`, `f0`–`f6`) the game's own compiled code is using for
+locals. Skipping that corrupts the caller's frame and crashes.
+
+## Investigation log
+
+- **A GameCube controller stops registering after unplugging/replugging, and
+  does not recover on a soft Reset** — *watchdog reinstated, actively being
+  tested.* A build without the `d597681` watchdog briefly appeared to have
+  broken GC detection entirely, but that turned out to be unrelated: it was
+  a stale controller/SI state on the test console that a full power cycle
+  cleared, not something introduced by any of these builds. The watchdog
+  was reverted, then reinstated word-for-word (`codes/RDKE01.ini`'s
+  `C2247ADC` entry, `src/poller_autopoll.s`, `tools/build.py`'s
+  `POLLER_AUTOPOLL`), verified byte-for-byte via `inject_dol.py` against a
+  clean retail DOL. Traced with Ghidra against the decompiled retail `si::`
+  library: every SI transfer — `SIGetType` included — is gated behind a
+  single **global** "transfer busy" flag at `0x80331538`
+  (`si::__SITransfer`, `0x801f48ec`); if it isn't `-1`, the call silently
+  no-ops. The only code that ever clears it is `si::CompleteTransfer`
+  (`0x801f4964`), reachable exclusively from `si::SIInterruptHandler`'s
+  branch gated on *both* SICOMCSR TC-complete bits (`0xc0000000`) being set
+  together. A GameCube pad unplugged mid-transfer signals an SI error
+  (`NOREP` in SISR) instead of a clean completion, so that gate never
+  opens — the flag stays wedged on the dead channel, and every future
+  `SIGetType` call for *all four* channels, not just the disconnected one,
+  silently no-ops forever until something clears it (which is consistent
+  with the state the test console was actually found in — stuck until a
+  full reboot). The poller now watches the flag itself: if it reads
+  non-idle for ~1 real second, it force-clears `0x80331538` and resets
+  `SICOMCSR` to `0x80000000`, the exact idle value `si::SIInit` writes at
+  boot. Needs a real hot-plug test on hardware next — this is the specific
+  bug this watchdog is meant to fix.
+
+  **Live debugging session (2026-09-14), via USB Gecko:** confirmed the
+  busy-flag mechanism against the real decompiled retail code (not just
+  static analysis): `si::SIInterruptHandler` really does gate
+  `CompleteTransfer()` behind both SICOMCSR TC-complete bits, exactly as
+  described above. Also found a second piece of state the watchdog doesn't
+  touch: `SIGetType` stamps the per-channel cached type slot at
+  `0x80331550 + channel*4` with a pending sentinel (`0x80`) when it starts
+  a transfer; that only gets resolved by `si::GetTypeCallback`, which is
+  itself only reachable through the same interrupt gate the watchdog is
+  working around. In practice this isn't a dead end — `GetTypeCallback`
+  updates the cached type from whatever response comes back, success *or*
+  error — but it means recovery depends on a fresh transfer actually
+  completing after the watchdog unwedges the busy flag, not just the flag
+  itself being cleared.
+
+  **This could not be tested against a real unplug/replug this session.**
+  Every USB Gecko hook type available in the client tool used (WPAD,
+  joypad/GCNPad, and VBI) blackscreens or freezes any patched build. A
+  vanilla (unpatched) disc connects fine with the VBI hook, confirming the
+  incompatibility is specific to something about our patch, not the console
+  or the tool. Vanilla is otherwise useless for testing this bug: the
+  retail game only calls `SIGetType` once at boot and never again, so its
+  cached type never changes on unplug regardless of what actually happens
+  at the SI level — only our patch's poller re-polls every frame, and
+  that's exactly the build we can't currently attach a debugger to.
+
+  **2026-09-14 elimination session:** tried to isolate exactly what about
+  the patch triggers this by building a series of test discs against a
+  clean retail DOL, each with only the SI poller hook (`0x80247ADC`)
+  present — none of the other five controller hooks, no Nunchuk-check
+  relaxation — and testing each against a live VBI hook:
+  - Full watchdog-equipped poller body alone: **still freezes.**
+  - Same, with the watchdog block removed entirely (just the per-frame
+    `SIGetType` call + four-channel `SIPOLL`/`OUTBUF` writes + error-ack,
+    no `OSDisableInterrupts`/`OSRestoreInterrupts`, no force-clear):
+    **still freezes.**
+  - Stripped further to the original single-channel body (`b2ef9a1`,
+    just `SIC0OUTBUF`/`SIPOLL` writes — no `SIGetType` call, no error-ack,
+    no watchdog at all): **still freezes.**
+  - Same minimal body, but with its appended code relocated from
+    `TEXT_ADDRESS = 0x80001800` (the low-memory slot every hook type we
+    tried appears to use for its own installed stub) to
+    `0x803EDBE0` — immediately past this DOL's own BSS end
+    (`0x80348C80 + 0xA4D48`), i.e. genuinely unclaimed memory outside the
+    known hook-installer region: **still freezes.**
+
+  So it isn't the watchdog, isn't `SIGetType`, isn't the error-ack, isn't
+  the four-channel vs. single-channel poll width, and isn't (at least not
+  only) the appended-code address colliding with the hook installer's own
+  landing spot. The one variable held constant across every one of these
+  builds is the branch instruction planted at `0x80247ADC` itself, inside
+  `KPADiRead`'s normal per-frame path — merely having *any* code execute
+  from that hook site, no matter how small or where its body lives, is
+  the common factor every failing build shares, and the one thing the
+  passing vanilla build doesn't have. Why that specifically breaks VBI
+  (and WPAD/GCNPad) polling is still unknown — plausibly the Gecko
+  client validates or checksums code/signatures near that call site
+  before trusting the hook it's about to install, and a modified branch
+  there fails that check in a way that hangs rather than errors cleanly,
+  but this is unconfirmed.
+
+  **Next step for whoever picks this up:** test whether a **no-op** hook
+  at `0x80247ADC` — a branch straight back to the original instruction,
+  doing nothing else at all — still freezes the debugger. If it does, the
+  incompatibility is with patching that address at all, not with anything
+  our code does there, and the fix is to find a different, unpatched hook
+  site for the SI poller (or accept that live debugging against a patched
+  build isn't possible with this tool and this hook site, and either find
+  a Gecko client that doesn't validate/checksum around it, or debug via a
+  from-scratch homebrew loader instead of Gecko OS-style hooking). If a
+  no-op hook does *not* freeze, the trigger is something in the poller
+  body itself that even the single-channel form still contains (the
+  `stwu`/`mflr`/register-save prologue shared by all three variants tried
+  is the next thing to strip and test). A working polling script for
+  watching `0x80331538`, `0x80331550`–`0x8033155c` (per-channel cached
+  type), `0xcd006434`/`0xcd006438` (SICOMCSR/SISR), and `0x803845b0`
+  (channel 0's queued-transfer slot) already exists at
+  `tools/gecko_watch.py` — keep individual reads sparse and slow (a tight
+  polling loop appeared to freeze the game outright by monopolizing the
+  hook's execution window) and confirm the game keeps running between
+  reads before trusting the results.
+
+  **2026-09-23 Dolphin session — boot crash found and fixed, watchdog
+  verified.** Any build containing the full SI poller black-screened in
+  Dolphin (vanilla booted fine). The game's own `OSReport` crash dump
+  (Dolphin's log with `OSREPORT` enabled) showed an ISI at `0x30` with a
+  corrupted `r1`/`r2`/LR. Root cause: the first word of the injected text
+  section at `0x80001800` is overwritten at runtime within a few seconds of
+  boot — every other word survives, and a GDB write watchpoint on it never
+  fires, so it isn't an ordinary CPU store. That word was the poller's
+  opening `stwu`, so the poller ran without a stack frame, trashed its
+  caller's frame, and the game later returned into garbage. Bisecting by
+  removing blocks of the poller had appeared to "fix" it only by shifting
+  which word landed at `0x80001800`. `inject_dol.py`'s `TEXT_ADDRESS` is
+  now `0x80001820` and the full six-hook build boots. This is plausibly
+  related to the USB Gecko freeze above — Gecko-style hook installers put
+  their own codehandler at `0x80001800` — but that is untested.
+
+  The same session fixed three poller bugs: `r5` (`KPADRead`'s sample
+  count, read right after the hook) wasn't preserved across `SIGetType`;
+  the watchdog's state lived at `0x803C9100`, which is 0xC0 bytes *before*
+  channel 0's KPAD struct (`0x803C91C0`), not at `+0x100` — now
+  `0x803C92C0`; and its 1-second timeout counted `KPADRead` calls instead
+  of time — it now uses the time base.
+
+  A real unplug/replug in Dolphin (Wii U GC adapter) recovers, but Dolphin
+  never wedges the busy flag in the first place, so that proves little.
+  Forcing the flag to `0` over the GDB stub to simulate the wedge showed
+  the watchdog doing its job: channel 0's cached type went to `0x80`
+  (pending) and stayed there until the watchdog reset the flag to `-1`,
+  after which it re-probed back to `0x09000000` and kept working. **Still
+  needed: the same unplug/replug on real hardware.**
+
+  **2026-09-23 hardware session (USB Gecko logger):** `tools/inject_dol.py
+  --log` adds `src/gecko_log.c`, which prints SI/KPAD state to a USB Gecko
+  in slot B five times a second and a crash report (type, SRR0, LR,
+  back-trace, GPRs, memory at SRR0) from `__OSUnhandledException` -- no
+  loader debugger hook needed. Keep the loader's debugger, hook type and
+  cheats **off**: its code handler lands at `0x80001800` over our section
+  and blackscreens. The section must also stay below `0x80003000` (OS
+  globals); the injector now enforces that. Found and fixed with it:
+  - SIPOLL was switched off by si::'s `SISetXY` (VI retrace refresh) from
+    an SDK shadow with polling disabled -> mirror our enables into the
+    shadow (`0x8033153C`).
+  - Type probes on empty ports collided with the pad's polling, and one
+    NOREP marked the pad unplugged -> require ~10 frames of NOREP, probe
+    unconfirmed ports at most every 0.25 s. **Presses and hot-plug now
+    confirmed working on hardware.**
+  - codeD's `addi r11,r11,-40` data pointer landed in its own code and
+    zeroed its branches (the runtime "overwrite" crashes); codeD's
+    channel-1 base used `ori` (player 2 never matched). Both repaired.
+  - codeE only synthesised for dev_type 0; a remote-less channel reads
+    0xFD. Now a GameCube pad drives a player with no Wii Remote (confirmed
+    for players 1 and 2), synthesising three samples per read.
+  - All hooks but the poller stand down while the HOME Menu is open
+    (`CHomeButtonMenu` at `0x80531B80`, open flag `+0x32`), except buttons
+    and pointer on a Classic Controller channel.
+  **Still open:** Classic Controller left drum (read_kpad_acc only runs the
+  Nunchuk block for sample types 4/5; letting type 2 in broke it
+  completely, so that was reverted); relaunching from the Wii Menu without
+  a power cycle; untested on hardware as of `43416e6`: Classic pointer on
+  the right stick again, player-2 responsiveness, Classic HOME-on-insert
+  filter.
+
+Older findings, in rough priority order:
+
+- **A second Wii Remote crashes or blackscreens the game** — *fixed,
+  confirmed on hardware.* The `ad51366` fix relaxed `CNunchakaCheck`'s two
+  extension-type branches (`0x80179990`/`0x80179F94`) by skipping them
+  outright, so *any connected* channel passed regardless of what was plugged
+  into it. That was too broad: a bare second Wii Remote with nothing
+  attached is "connected" but has extension type 0, so it passed the gate
+  and the game then read Nunchuk-shaped data that was never populated for
+  it — crashing mid-race when a second remote joined during play, and
+  blackscreening when one was already connected at boot. Fixed by relaxing
+  the two `cmplwi r0,1` compares (at `0x8017998C`/`0x80179F90`, immediately
+  before each branch) to `cmplwi r0,0` instead of touching the branches —
+  the gate now passes for "any extension present" (Nunchuk=1, Classic=2,
+  Bongo=5, our synthetic GC device type=4) but still correctly rejects
+  extension 0 (nothing attached), matching vanilla behaviour for a bystander
+  who connects a bare second remote.
+- **Hot-plugging a GameCube controller breaks it, and does not recover on a
+  soft Reset from the HOME Menu** — *watchdog written and statically
+  verified end-to-end (assembled, injected into a real retail DOL,
+  disassembled and checked instruction-by-instruction against intent), not
+  yet confirmed on hardware.* Traced with Ghidra against the decompiled
+  retail `si::` library: every SI transfer — `SIGetType` included — is
+  gated behind a single **global** "transfer busy" flag at `0x80331538`
+  (`si::__SITransfer`, `0x801f48ec`); if it isn't `-1`, the call silently
+  no-ops. The only code that ever clears it is `si::CompleteTransfer`
+  (`0x801f4964`), reachable exclusively from `si::SIInterruptHandler`'s
+  branch gated on *both* SICOMCSR TC-complete bits (`0xc0000000`) being set
+  together. A GameCube pad unplugged mid-transfer signals an SI error
+  (`NOREP` in SISR) instead of a clean completion, so that gate never
+  opens — the flag stays wedged on the dead channel, and every future
+  `SIGetType` call for *all four* channels, not just the disconnected one,
+  silently no-ops forever. An exhaustive cross-reference search over the
+  whole binary confirms nothing outside `si::` itself ever touches
+  `0x80331538`, and nothing inside it times out — this is a real gap in
+  the retail code, not a misunderstanding of some existing recovery path.
+  A soft reset should reload `.bss`/`.data` from the DOL and clear this
+  fine on its own, for what it's worth, so it likely isn't the true
+  culprit for the "doesn't recover on Reset" half of this bug either — but
+  that part remains unconfirmed.
+
+  The poller (`src/poller_autopoll.s`) now watches the flag itself: if it
+  reads non-idle for ~1 real second (240 checks at 4 channel-calls/frame,
+  60fps — far beyond any legitimate transfer's duration, so this can't
+  misfire against a merely slow one), it force-clears `0x80331538` and
+  resets `SICOMCSR` to `0x80000000`, the exact idle value `si::SIInit`
+  itself writes at boot, bypassing the game's own timeout-less completion
+  path entirely. The counter lives at channel 0's KPAD `+0x100` (global
+  state, parked in channel 0's struct for a fixed address; confirmed clear
+  of the existing drum-timer scratch at `+0x108`/`+0x10c`, see
+  `codeB_cc.s`). Needs an actual hot-plug test on hardware next.
+- **A Classic Controller's left shoulder and IR-pointer stick stop working
+  after a GameCube-controller hot-plug failure** — *still open, likely
+  downstream of the hot-plug bug above.* Reported specifically after a GC
+  controller connected to Port 1 stopped being recognised post-reset; not
+  yet reproduced/isolated independently of that state.
+- **A GameCube controller in Port 2 still needs a real Wii Remote connected
+  to register the player** — *not yet implemented.* `codeE` (see
+  "Synthesising a sample") only solves the per-frame *KPAD sample* problem —
+  it makes `KPADiRead` stop early-outing once a channel has no Wii Remote
+  and gives it something to inject into. Player *presence* at the join/
+  character-select screen is a separate, earlier gate: `CNunchakaCheck`
+  loops over channels and, before it even checks extension type, calls a
+  virtual "is this channel connected" method (`vtable[3]`, dispatched off a
+  singleton at `-0x5E44(r13)+0xC`) that appears to reflect real WPAD/
+  Bluetooth pairing state, not anything KPAD-level. Making a bare GameCube
+  pad register as a present player means finding and patching that
+  connected-check call site(s) too — same shape of fix as the
+  `CNunchakaCheck` extension patch above, but its result is very likely used
+  well beyond this one screen (pause menu, player-count HUD, etc.), so it
+  needs its own dedicated investigation rather than a guess shipped blind.
+- **The IR pointer (menu cursor, e.g. character/course select) does not
+  move for player 2** — *still open, root cause partially traced.* Confirmed
+  on hardware for both a GameCube controller and a Classic Controller in
+  Port/slot 2 (both paired with a real Wii Remote so the channel registers
+  at all); player 1 works fine with the same hardware, and pointing the
+  actual IR sensor bar at a real second Wii Remote doesn't help either — so
+  this isn't about missing "dots" data or an SI-port/channel-arithmetic bug
+  specific to GC code (a Classic Controller never touches SI at all and
+  fails identically). The bug tracks the *player 2* role, not the device.
+
+  Tracing the game's per-channel KPAD-update function (`0x80247adc`, the
+  same function containing the poller/button/IR hooks) found that it reads
+  a repacked local-stack copy of the live sample (`r19`, an offset-preserving
+  copy of `sample_base+0`) and dispatches on the signed byte at `r19+0x29`
+  — the same field `codeE_sample.s` documents as "extension error, must be
+  0" for its own synthetic sample:
+    - `== 0` calls `0x80247864` (not the IR routine)
+    - `> 0` skips entirely
+    - `== -7` is the *only* value that reaches `0x802470c0`, which is what
+      calls the IR-pointer routine containing our `codeD` hook (`0x80247500`)
+    - any other negative value is also skipped
+
+  This looked at first like it could be explained by `codeE`'s own write of
+  `+0x29 = 0` for a synthesized sample — but `codeE` only fires when
+  `ext == 0`, and never touches a Classic Controller channel at all, so it
+  cannot be the whole story for the CC-on-port-2 case. The dispatch is
+  channel-specific rather than device-specific, which points at the game's
+  own per-channel sample population — the real Wii Remote's WPAD callback at
+  `0x802485C8`/`0x802485E0` — as the more likely place `+0x29` (or something
+  read alongside it) ends up different for channel 1 than channel 0. Not
+  yet traced further; needs either a live memory watch on hardware/Dolphin
+  comparing `+0x29` (and the `-7` classification) between channels 0 and 1,
+  or continued static tracing from the WPAD callback forward. Blind-patching
+  this without that verification isn't worth the regression risk, since the
+  byte is reused for at least one unrelated check (`0x802462BC`).
+- **A Classic Controller in the Wii Remote's Player 1 slot overrides rather
+  than merges with a GameCube controller in Port 1** — *not yet
+  implemented.* Today `codeA`/`codeB`/`codeC`/`codeD` read *either* the CC
+  extension (`ext==2`) *or* SI/GC data per hook, never both — see each
+  hook's `bne`/`beq` fork on `lbz r10, 0x5C(3x)`. OR-ing the two input
+  sources together (so either controller can drive Port 1 without a Wii
+  Remote conceptually being "needed" at all) is a reasonable follow-up once
+  the Port 2 registration gate above is solved, since both changes touch the
+  same "what counts as a valid controller" logic.
+- **Hot-plugging a GameCube controller breaks it** — *revised fix written,
+  not yet confirmed on hardware.* Unplug and replug and the console stopped
+  recognising the pad until the game was restarted. The cause is SI error
+  latching: `NOREP` sticks in `SISR` and nothing acknowledged it, so
+  `ERRSTAT` stayed set in `INBUFH` and every hook skipped injection forever.
+  The poller clears the error nibbles and calls the SDK's throttled
+  `SIGetType` path for the current channel, causing a disconnected channel
+  to be probed again after the controller is reinserted.
+- **A Wii Remote + Nunchuk is still required** — *fix written, not yet run.*
+  The real blocker is upstream
+  of the extension check: `KPADiRead` early-outs at `0x80247BE0` when the
+  channel's queued-sample count at KPAD `+0x10F` is zero, which is exactly
+  the case with no Wii Remote connected — so none of the four hooks ever run
+  and there is nothing to inject into. Samples are a 16-entry ring of `0x38`
+  bytes at KPAD `+0x110`, with the write index at `+0x10E` and the count at
+  `+0x10F`, filled by the WPAD callback at `0x802485E0`.
+
+  `codeE` (see "Synthesising a sample") now fabricates one, so a bare
+  GameCube pad should be able to drive player *N* on its own. **Written and
+  statically verified, but not yet run** — on hardware or in Dolphin.
+
+  `codeE` is deliberately inert whenever a real Wii Remote sample is queued,
+  and now also refuses to synthesize over any active extension state. This
+  prevents a transient empty queue from replacing Classic Controller or
+  Nunchuk state when a GameCube controller is present on the same channel.
+- **The left drum was less responsive than the right.** The clean injector
+  holds the left stroke for six frames instead of four so it survives the
+  weaker Nunchuk-side processing. This is implemented and statically verified;
+  hardware confirmation remains. It was not a threshold
+  problem — the two trigger paths really are symmetric in `codeA` (same
+  `> 40` compare on both analog bytes, same digital masks). The asymmetry is
+  the *destination*: the right drum writes the Wii Remote motion vector at
+  `+0x4DC`–`+0x4E4` and the left drum writes the Nunchuk one at
+  `+0x4E8`–`+0x4F0`, and only the second is gated. `read_kpad_acc` processes
+  the Wii Remote vector unconditionally, but reaches the Nunchuk vector at
+  `0x802462EC` only if the sample's device-type byte at `+0x36` is **4 or 5**
+  (checked at `0x802462D4`) — anything else branches straight to the
+  function's exit at `0x80246588` and the left drum's motion is simply never
+  read. That byte is written from the WPAD probe result at `0x802485F8`
+  (the value the game's controller manager keeps at its WPAD context
+  `+0x8b8`), so it is a Wii-side device type, not something the GameCube pad
+  influences.
+
+  **That gate is probably not the cause, though**, and this is worth being
+  explicit about rather than leaving as a plausible-sounding theory: the left
+  drum is *weak*, not dead, and the game is played today with a real Nunchuk
+  connected — which almost certainly already reports 4 there, or the Nunchuk
+  block would never run at all. So the asymmetry is more likely in the
+  processing itself: the Wii Remote branch at `0x80246004`–`0x802460B0` and
+  the Nunchuk branch at `0x80246310`–`0x8024645C` are separate code doing
+  separate arithmetic, and they have not been compared instruction by
+  instruction yet. Confirming what a real Nunchuk reports at `+0x36` is a
+  one-line read in Dolphin and should come first.
+- **The post-race tips failure came from the historical baked codeD layout.**
+  That DOL had ten leading pad words but branched over only eight, allowing the
+  IR/pointer path used by the tips screen to execute zero data. Clean injection
+  uses the internally correct eight-word/`b +0x24` body and direct hook
+  placement. Console confirmation remains.
+- The Classic Controller left drum used to write the "nunchuk shake" magnitude at
+  KPAD `+0x74`/`+0x78`, which for a Classic Controller is where codeD reads
+  the **right stick** for the IR pointer. So the pointer jerks for the ~4
+  frames of each left-drum hit. Injected codeD now reads the preserved right
+  stick at `+0x7c`/`+0x80`, so drum motion at `+0x74`/`+0x78` no longer jerks
+  the pointer.
+- Jump uses a placeholder acceleration vector; real captured values are needed.
+  On a Classic Controller jump is reached by hitting both drums at once, so it
+  inherits that same limitation.
+- Clean injection fixes four-player routing: channel 1 uses `addi` rather than
+  `ori` to form `0x803C96E4`, and channel 3 has an explicit stub into the shared
+  Classic/GameCube controller check. The poller already enables all four SI
+  channels. Multiplayer still needs console testing.
+- USA (`RDKE01`) only.
+- The `autopoll` poller's hook installs correctly and runs without crashing in
+  Dolphin (checked with a GDB-stub debugger against the compiled code, not
+  just read from source), but it has **not** been confirmed to actually fire
+  during gameplay in Dolphin or on real hardware yet, and the `SIPOLL` enable-
+  bit values it writes (`EN0`/`VBCPY0`) are inferred from the documented
+  register layout, not independently confirmed against this game's linked SDK
+  the way the SI base address and register offsets were. If it doesn't work
+  on your console, try the `stash` variant, which sidesteps that assumption
+  entirely.
+
+
+## Classic Controller
+
+Every hook now has a Classic Controller path. `tools/ccpatch.py` documents and
+applies the three changes that got it there — read it before touching any of
+this, since it edits the shipped code at the word level (the working sources
+were lost; see [`src/README.md`](../src/README.md)).
+
+**Buttons.** codeA checks the KPAD extension type (`2` = Classic Controller)
+and folds the Classic button word into the Wii Remote button bits (`r7`) the
+game actually reads, before the composing instruction runs:
+
+| Classic Controller | Reported as Wii Remote |
+| --- | --- |
+| A | A |
+| B | B |
+| D-pad Up / Down / Left / Right | D-pad Up / Down / Left / Right |
+| + | + |
+| − | − |
+| HOME | HOME |
+
+D-pad **Right** never actually worked before: the test was `andis. r0,r9,0x8000`
+(i.e. `r9 & 0x80000000`), but `r9` is the Classic button word loaded by
+`lwz r9,0x60(r31)`, which `KPADiRead` fills from a zero-extended `u16` — bit 31
+is never set. Classic Right is `0x8000`, so the test has to be `andi.`.
+
+**Drumming and jump.** codeB previously had no Classic branch at all. It now
+gets one that synthesises the same two registers its existing GameCube drum
+state machine already consumes — `r6` (the button word, as if it were SI
+`in_hi >> 16`) and `r12` (the analog word, as if it were `in_lo`) — and then
+falls into that shared code untouched. So the edge-trigger, the 4-frame
+oscillation and the "both drums at once = jump" behaviour are all reused
+verbatim rather than reimplemented:
+
+| Classic Controller | In-game action |
+| --- | --- |
+| R or ZR, or the R analog trigger | Right drum |
+| L or ZL, or the L analog trigger | Left drum |
+| both together | Both drums — jump / boost |
+
+The analog triggers are read as normalised floats from KPAD `+0x7c` (L) and
+`+0x80` (R) and rescaled to the 0-255 range the GameCube path expects, so a
+half-pull registers exactly like a GameCube hair-trigger. Those two offsets are
+confirmed from the game's own stick reader (`zz_80247864_`), which fills them
+from raw bytes `+0x34`/`+0x35` scaled between the `nDigitalLRBorder`-style
+bounds.
+
+**Sticks.** codeC's Classic branch was reading the wrong addresses entirely.
+In codeC `r30` is the channel base **+ 0x60** — provable from its own
+channel-detect constants, which compare `r30` against `0x803C9220` /
+`0x803C9C68` / `0x803CA18C`, each exactly `base+0x60` — but the branch was
+written as though `r30` were the bare base. The extension-type probe therefore
+read `base+0xBC` instead of `base+0x5c`, the stick reads hit `base+0xCC`/`0xD0`
+instead of `base+0x6c`/`0x70`, and the float scratch landed at `base+0x168`,
+which is **inside the KPAD sample ring buffer** (it starts at `+0x110`). All of
+it is rebased, and the scratch moved onto codeC's own stack frame.
+
+**Motion isolation.** The moment the Classic Controller branch is entered, it
+zeroes six per-axis accelerometer scale factors at KPAD `+0x4dc`–`+0x4f0` —
+the same fields `zz_80245f98_` (this hook's containing function) multiplies
+the raw Wii Remote/Nunchuk delta by every frame, before this code even runs.
+Without it, physically moving the Wii Remote you're required to keep
+connected (see "What is mapped") would add its own spurious drum hits on top
+of the Classic Controller's.
+
+## Classic Controller without a Nunchuk
+
+The patch targets the actual `CNunchakaCheck` screen. Two branches in that
+class reject a connected player unless the extension query returns exactly
+`1` (Nunchuk); skipping only those rejection branches lets a Classic
+Controller pass while preserving the screen's player-presence logic.
+
+An earlier seven-site patch was incorrect: Ghidra analysis showed those were
+unrelated gameplay object-state checks. It has been removed because it could
+corrupt menu or multiplayer state and cause blackscreens/crashes.
+
