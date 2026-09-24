@@ -523,6 +523,37 @@ locals. Skipping that corrupts the caller's frame and crashes.
   after which it re-probed back to `0x09000000` and kept working. **Still
   needed: the same unplug/replug on real hardware.**
 
+  **2026-09-23 hardware session (USB Gecko logger):** `tools/inject_dol.py
+  --log` adds `src/gecko_log.c`, which prints SI/KPAD state to a USB Gecko
+  in slot B five times a second and a crash report (type, SRR0, LR,
+  back-trace, GPRs, memory at SRR0) from `__OSUnhandledException` -- no
+  loader debugger hook needed. Keep the loader's debugger, hook type and
+  cheats **off**: its code handler lands at `0x80001800` over our section
+  and blackscreens. The section must also stay below `0x80003000` (OS
+  globals); the injector now enforces that. Found and fixed with it:
+  - SIPOLL was switched off by si::'s `SISetXY` (VI retrace refresh) from
+    an SDK shadow with polling disabled -> mirror our enables into the
+    shadow (`0x8033153C`).
+  - Type probes on empty ports collided with the pad's polling, and one
+    NOREP marked the pad unplugged -> require ~10 frames of NOREP, probe
+    unconfirmed ports at most every 0.25 s. **Presses and hot-plug now
+    confirmed working on hardware.**
+  - codeD's `addi r11,r11,-40` data pointer landed in its own code and
+    zeroed its branches (the runtime "overwrite" crashes); codeD's
+    channel-1 base used `ori` (player 2 never matched). Both repaired.
+  - codeE only synthesised for dev_type 0; a remote-less channel reads
+    0xFD. Now a GameCube pad drives a player with no Wii Remote (confirmed
+    for players 1 and 2), synthesising three samples per read.
+  - All hooks but the poller stand down while the HOME Menu is open
+    (`CHomeButtonMenu` at `0x80531B80`, open flag `+0x32`), except buttons
+    and pointer on a Classic Controller channel.
+  **Still open:** Classic Controller left drum (read_kpad_acc only runs the
+  Nunchuk block for sample types 4/5; letting type 2 in broke it
+  completely, so that was reverted); relaunching from the Wii Menu without
+  a power cycle; untested on hardware as of `43416e6`: Classic pointer on
+  the right stick again, player-2 responsiveness, Classic HOME-on-insert
+  filter.
+
 Older findings, in rough priority order:
 
 - **A second Wii Remote crashes or blackscreens the game** — *fixed,
