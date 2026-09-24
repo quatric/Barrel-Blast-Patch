@@ -9,18 +9,31 @@ by Wii Remote / Nunchuk shake detection, and the game has no GameCube input path
 at all. These codes hook the KPAD library, poll the Serial Interface directly, and
 synthesise the motion the game is looking for from GameCube button and stick state.
 
-> **✅ Confirmed working on real hardware** (2026-08-09), after a long stretch
-> where these codes worked in Dolphin and did nothing at all on console. The
-> cause was the SI auto-polling gap described under "Reading the GameCube
-> controller" below; the `autopoll` poller fixes it. Build a disc image with
-> `tools/build_full_dol.py` (poller + Classic Controller baked into
-> `main.dol` together).
+> **v1.0** — tested on a real Wii with a USB loader. Build it with the
+> patcher (`tools/gui.py`, see "Patcher tool" below): drop a clean USA
+> `RDKE01` `.wbfs`/`.iso` on it and it patches the image in place. No
+> devkitPPC needed — the one C helper (`src/cc_nunchuk.c`) ships prebuilt in
+> `tools/prebuilt/`, checked against its source hash.
 >
-> **Still a work in progress** — the clean-disc injector now includes
-> hot-plug recovery, bare-GC sample synthesis, four-channel routing, balanced
-> left-stroke timing, and the corrected pointer-hook layout. These repairs are
-> statically and WBFS-round-trip verified, but still need a final real-console
-> regression pass.
+> **Working in 1.0:** GameCube pad drums and stick, presses registering
+> reliably, GameCube hot-plugging mid-race, a GameCube pad driving a player
+> with no Wii Remote (players 1 and 2), Classic Controller buttons, pointer
+> and left/right drums, the HOME Menu driven by the Wii Remote (or a Classic
+> Controller), and no accidental HOME Menu when a Classic Controller is
+> plugged in.
+>
+> **Known issues in 1.0:** player 1's pointer can stay put until the HOME
+> Menu has been opened once; player 2 occasionally misses a shake; with a
+> Classic Controller ZL counts as a left-drum hit; relaunching the game
+> without powering the console off can leave GameCube pads unresponsive
+> (power-cycle between sessions); players 3 and 4 are untested. The
+> `codes/RDKE01.ini` Gecko codes (Dolphin/runtime loaders) don't include the
+> Classic Controller left-drum converter, which only exists in patched
+> images. Work continues on the `wip-after-v1.0` branch.
+>
+> **USB loader settings:** turn the loader's debugger, hook type and cheats
+> **off** for this game — its code handler loads at `0x80001800` on top of
+> the injected code and black-screens.
 
 ## Classic Controller
 

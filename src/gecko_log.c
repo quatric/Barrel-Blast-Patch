@@ -5,7 +5,7 @@
  * to it directly (the same EXI exchange libogc's usbgecko.c uses) and
  * prints one line of SI state at most every ~0.2 s:
  *
- *   t<type0>,<type1>,<type2>,<type3> S<SISR> L<SIPOLL> I<C0INBUFH>
+ *   B<busy> t<type0>,<type1>,<type2>,<type3> S<SISR> L<SIPOLL> I<C0INBUFH>
  *     K<ch0 hold>,<ch0 dev_type/wpad_err/dpd_valid/format>
  *      <ch1 hold>,<ch1 dev_type/...>  (KPADStatus words +0x00 and +0x5C)
  *     Q<samples queued on channel 0>/<channel-0 reads> since the last line
@@ -79,6 +79,7 @@ void gecko_log(u32 chan)                /* r3 = KPADRead's channel */
     if (exchange(0x90000000) != 0x04700000)   /* USB Gecko ID check */
         return;
 
+    field('B', REG(0x80331538));        /* si:: busy flag, -1 idle */
     put('t');
     for (i = 0; i < 4; i++) {
         hex(REG(0x80331550 + i * 4));   /* si:: cached type */
