@@ -9,11 +9,17 @@ import os
 import re
 import struct
 import subprocess
+import sys
 import tempfile
 
 from dol import Dol
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# In a PyInstaller build the data files (codes/, src/, tools/prebuilt/) are
+# bundled under sys._MEIPASS at the same relative layout as the repository.
+if getattr(sys, 'frozen', False):
+    HERE = os.path.join(sys._MEIPASS, 'tools')
+else:
+    HERE = os.path.dirname(os.path.abspath(__file__))
 INI = os.path.join(HERE, '..', 'codes', 'RDKE01.ini')
 # Not 0x80001800: the first word there is overwritten at runtime shortly
 # after boot (seen in Dolphin; not a CPU store -- a write watchpoint on it

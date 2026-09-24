@@ -81,25 +81,29 @@ jobs:
         run: |
           BINS=""
           for f in wit_bin/*; do BINS="$BINS --add-binary $f:."; done
-          pyinstaller --name DKBB-GC-Bongos-Patcher --windowed --noconfirm \
+          pyinstaller --name Barrel-Blast-Patcher --windowed --noconfirm \
             --collect-all tkinterdnd2 \
             --icon assets/icon.icns --target-architecture universal2 \
+            --add-data codes/RDKE01.ini:codes --add-data src/cc_nunchuk.c:src \
+            --add-data tools/prebuilt:tools/prebuilt \
             $BINS --distpath pyinst_dist tools/gui.py
-          cp wit-gpl-2.0.txt "pyinst_dist/DKBB-GC-Bongos-Patcher.app/Contents/Resources/wit-gpl-2.0.txt"
+          cp wit-gpl-2.0.txt "pyinst_dist/Barrel-Blast-Patcher.app/Contents/Resources/wit-gpl-2.0.txt"
           cd pyinst_dist
-          zip -qr "../DKBB-GC-Bongos-Patcher-${{ matrix.target }}.zip" DKBB-GC-Bongos-Patcher.app
+          zip -qr "../Barrel-Blast-Patcher-${{ matrix.target }}.zip" Barrel-Blast-Patcher.app
 
       - name: Build app (Linux)
         if: matrix.target == 'linux-x86_64'
         run: |
           BINS=""
           for f in wit_bin/*; do BINS="$BINS --add-binary $f:."; done
-          pyinstaller --name DKBB-GC-Bongos-Patcher --windowed --noconfirm \
+          pyinstaller --name Barrel-Blast-Patcher --windowed --noconfirm \
             --collect-all tkinterdnd2 \
+            --add-data codes/RDKE01.ini:codes --add-data src/cc_nunchuk.c:src \
+            --add-data tools/prebuilt:tools/prebuilt \
             $BINS --distpath pyinst_dist tools/gui.py
-          cp wit-gpl-2.0.txt pyinst_dist/DKBB-GC-Bongos-Patcher/
+          cp wit-gpl-2.0.txt pyinst_dist/Barrel-Blast-Patcher/
           cd pyinst_dist
-          tar -czf "../DKBB-GC-Bongos-Patcher-${{ matrix.target }}.tar.gz" DKBB-GC-Bongos-Patcher
+          tar -czf "../Barrel-Blast-Patcher-${{ matrix.target }}.tar.gz" Barrel-Blast-Patcher
 
       - name: Build app (Windows)
         if: matrix.target == 'windows-x86_64'
@@ -107,25 +111,27 @@ jobs:
         run: |
           BINS=""
           for f in wit_bin/*; do BINS="$BINS --add-binary $f;."; done
-          pyinstaller --name DKBB-GC-Bongos-Patcher --windowed --noconfirm \
+          pyinstaller --name Barrel-Blast-Patcher --windowed --noconfirm \
             --collect-all tkinterdnd2 \
             --icon assets/icon.ico \
+            --add-data "codes/RDKE01.ini;codes" --add-data "src/cc_nunchuk.c;src" \
+            --add-data "tools/prebuilt;tools/prebuilt" \
             $BINS --distpath pyinst_dist tools/gui.py
-          cp wit-gpl-2.0.txt pyinst_dist/DKBB-GC-Bongos-Patcher/
+          cp wit-gpl-2.0.txt pyinst_dist/Barrel-Blast-Patcher/
           cd pyinst_dist
-          7z a "../DKBB-GC-Bongos-Patcher-${{ matrix.target }}.zip" DKBB-GC-Bongos-Patcher \
-            || powershell -Command "Compress-Archive -Path DKBB-GC-Bongos-Patcher -DestinationPath ../DKBB-GC-Bongos-Patcher-${{ matrix.target }}.zip"
+          7z a "../Barrel-Blast-Patcher-${{ matrix.target }}.zip" Barrel-Blast-Patcher \
+            || powershell -Command "Compress-Archive -Path Barrel-Blast-Patcher -DestinationPath ../Barrel-Blast-Patcher-${{ matrix.target }}.zip"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: DKBB-GC-Bongos-Patcher-${{ matrix.target }}
-          path: DKBB-GC-Bongos-Patcher-${{ matrix.target }}.*
+          name: Barrel-Blast-Patcher-${{ matrix.target }}
+          path: Barrel-Blast-Patcher-${{ matrix.target }}.*
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: DKBB-GC-Bongos-Patcher-${{ matrix.target }}.*
+          files: Barrel-Blast-Patcher-${{ matrix.target }}.*
 
   patch-files:
     runs-on: ubuntu-22.04
@@ -133,15 +139,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Zip Gecko codes
-        run: zip -qr DKBB-Gecko-Codes.zip codes
+        run: zip -qr Barrel-Blast-Gecko-Codes.zip codes
 
       - uses: actions/upload-artifact@v4
         with:
-          name: DKBB-Gecko-Codes
-          path: DKBB-Gecko-Codes.zip
+          name: Barrel-Blast-Gecko-Codes
+          path: Barrel-Blast-Gecko-Codes.zip
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: DKBB-Gecko-Codes.zip
+          files: Barrel-Blast-Gecko-Codes.zip
