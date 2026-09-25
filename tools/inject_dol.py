@@ -488,39 +488,15 @@ def repair_bongos(bodies):
         assert w[k + 1] >> 16 == 0x4182, f'{name}: expected beq after the check'
         w[k + 1] = 0x60000000
         bodies[hook] = w
-    # codeA (buttons), DK Bongos only: the drums never send Wii Remote A/B
-    # -- in a race the drums are hit constantly, and an off-centre hit on
-    # the right bongo's lower half (A) punched -- and the clap sends A
-    # (attack). Start stays + (pause). Menus are driven with the Wii Remote,
-    # whose own buttons pass through (drum-tap D-pad directions were tried:
-    # the menus didn't follow them). Hooked on codeA's `srwi r12,r12,16`,
-    # while the stick bytes are still in r12's low half: only a pad with no
-    # sticks is a bongo, so a GameCube pad's buttons are unchanged.
-    # Source: src/bongo_buttons.s.
-    w = list(bodies[0x80248090])
-    shift = [i for i, x in enumerate(w) if x == 0x558C843E]     # srwi r12,r12,16
-    if len(shift) != 1:
-        raise AssertionError(f'codeA: button shift found {len(shift)} times')
-    at = shift[0]
-    cave = [0x7180FCFC,        # andi.  r0,r12,0xFCFC  stick bytes (in_hi low half)
-            0x558C843E,        # srwi   r12,r12,16     (doesn't touch cr0)
-            0x40820014,        # bne    back           a real pad: unchanged
-            0x718CFCFF,        # andi.  r12,r12,0xFCFF drop A and B
-            0x71800020,        # andi.  r0,r12,0x0020  R (clap)
-            0x41820008,        # beq    back
-            0x618C0100,        # ori    r12,r12,0x0100 -> A
-            0]                 # back:  b at+1
-    assert cave[:-1] == [0x7180FCFC, 0x558C843E, 0x40820014, 0x718CFCFF, 0x71800020, 0x41820008, 0x618C0100]
-    back = len(cave) - 1
-    c = _insert_cave(w, cave)
-    w[c + back] = branch((c + back) * 4, (at + 1) * 4)
-    w[at] = branch(at * 4, c * 4)
-    bodies[0x80248090] = w
-    # codeF (motion neutralising): any responding pad counts as present.
+    # codeF (motion neutralising) zeroes the Wii Remote's own motion while a
+    # GameCube pad drives the player. A bongo player still shakes and tilts
+    # the Wii Remote, so test the stick bytes instead of the use-origin bit:
+    # only a pad with sticks neutralises (an earlier repair let any
+    # responding pad through, which killed Wii Remote motion with bongos).
     w = list(bodies[0x80247FA8]); k = check_at(w, 'codeF')
+    rs = (w[k] >> 21) & 31
     assert w[k + 1] >> 16 == 0x4082, 'codeF: expected bne after the check'
-    target = _rel_target(k + 1, w[k + 1])
-    w[k + 1] = 0x48000000 | (((target - (k + 1)) * 4) & 0x03FFFFFC)
+    w[k] = 0x70000000 | (rs << 21) | 0xFCFC          # andi. r0,rS,0xFCFC
     bodies[0x80247FA8] = w
     # codeC (stick) and codeD (pointer): skip when both stick bytes are zero
     # instead -- a bongo has no sticks, and (0 ^ 0x80) would read as full
@@ -534,8 +510,9 @@ def repair_bongos(bodies):
     # codeB (drums): drop the requirement, and remap bongo buttons onto the
     # GameCube drum masks (right = Y 0x0800, left = X 0x0400): A/X (right
     # bongo) -> right, B/Y (left bongo) -> left. R (the clap mic) is
-    # not a drum: hitting both drums already sets both bits, which jumps.
-    # codeA sends the clap as Wii Remote A.
+    # ignored: hitting both drums already sets both bits, which jumps.
+    # codeA passes the bongo's A/B on as Wii Remote A/B (attack, menus);
+    # dropping them for the clap as A was tried, and the drums were missed.
     w = list(bodies[0x80246588]); k = check_at(w, 'codeB')
     assert w[k + 1] >> 16 == 0x4182
     w[k + 1] = 0x60000000
