@@ -8,14 +8,14 @@ The patch is applied to your own copy of the game: drop a clean `.wbfs` or
 `.iso` onto the patcher and play the result on a Wii (USB loader) or in
 Dolphin. Nothing from the game is included in this repository.
 
-## Status — v1.0
+## Status — v1.1
 
 Tested on a real Wii with a USB loader.
 
 **Works:**
 
-- GameCube pad and DK Bongos: left/right drums, both-drums jump, steering,
-  menus
+- GameCube pad: left/right drums, both-drums jump, steering, menus
+- DK Bongos (new in v1.1): left/right drums and clap-to-jump
 - presses registering reliably, and unplugging/replugging a GameCube pad
   at the title screen or in menus
 - a GameCube pad driving a player that has no Wii Remote (players 1 and 2)
@@ -52,8 +52,8 @@ Tested on a real Wii with a USB loader.
 ### DK Bongos
 
 The bongos plug into a GameCube port and are detected automatically (they
-have no sticks). Hit the left or right drum for that side, both for jump /
-boost, and Start to pause. There's no steering on bongos alone, just like the
+have no sticks). Hit the left drum (B/Y) or right drum (A/X) for that side,
+clap for jump / boost, and press Start to pause. There's no steering on bongos alone, just like the
 original game, which pairs bongo hits with Wii Remote tilt.
 
 ### Classic Controller
