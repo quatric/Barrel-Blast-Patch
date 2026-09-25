@@ -34,7 +34,6 @@ TEXT_ADDRESS = 0x80001820
 #   +0x18..+0x1B  codeE: per-channel "last KPAD sample was synthesised" flag
 #   +0x1C..+0x1F  gecko_log.c: channel-0 queued-sample / read counters
 #   +0x20..+0x23  codeA gate: per-channel Classic Controller warm-up counters
-#   +0x24..+0x33  codeA: per-channel DK Bongos hit state (see repair_bongos)
 #   +0x40..+0x4F  cc_nunchuk.c: per-channel left-drum stroke state
 SCRATCH_BYTES = 0x60
 # The section must end before the OS's low-memory globals at 0x80003000
@@ -60,7 +59,6 @@ HBM_CC_PASS = (0x80248090, 0x80247500)
 CC_WARMUP_HOOK = 0x80248090
 CC_WARMUP = TEXT_ADDRESS + 0x20      # 4 per-channel counters in the scratch
 CC_WARMUP_READS = 30                 # ~0.5 s at one read per frame
-BONGO_STATE = TEXT_ADDRESS + 0x24    # 4 per-channel DK Bongos hit words
 HBM_OBJECT = 0x80531B80
 HBM_VTABLE = 0x802E7288
 HBM_OPEN_FLAG = HBM_OBJECT + 0x32
@@ -490,44 +488,29 @@ def repair_bongos(bodies):
         assert w[k + 1] >> 16 == 0x4182, f'{name}: expected beq after the check'
         w[k + 1] = 0x60000000
         bodies[hook] = w
-    # codeA (buttons), DK Bongos only. The drums never send Wii Remote A/B:
-    # in a race the drums are hit constantly, and an off-centre hit on the
-    # right bongo's lower half (A) punched. The clap sends A (attack, menu
-    # select) and Start also sends B (menu back). The menus need directions,
-    # so a hit that starts after ~0.5 s without drumming -- a menu tap -- is
-    # a D-pad direction per sensor: left drum top (Y) Up, bottom (B) Down;
-    # right drum top (X) Right, bottom (A) Left. Hooked on codeA's
-    # `srwi r12,r12,16`, while the stick bytes are still in r12's low half:
-    # only a pad with no sticks is a bongo, so a GameCube pad's buttons are
-    # unchanged. Per channel, one scratch word holds the time base
-    # (60.75 MHz) of the last drum contact with the state in its low two
-    # bits: 0 idle, 3 idle long enough, 1 menu tap, 2 drumming.
+    # codeA (buttons), DK Bongos only: the drums never send Wii Remote A/B
+    # -- in a race the drums are hit constantly, and an off-centre hit on
+    # the right bongo's lower half (A) punched -- and the clap sends A
+    # (attack). Start stays + (pause). Menus are driven with the Wii Remote,
+    # whose own buttons pass through (drum-tap D-pad directions were tried:
+    # the menus didn't follow them). Hooked on codeA's `srwi r12,r12,16`,
+    # while the stick bytes are still in r12's low half: only a pad with no
+    # sticks is a bongo, so a GameCube pad's buttons are unchanged.
     # Source: src/bongo_buttons.s.
     w = list(bodies[0x80248090])
     shift = [i for i, x in enumerate(w) if x == 0x558C843E]     # srwi r12,r12,16
     if len(shift) != 1:
         raise AssertionError(f'codeA: button shift found {len(shift)} times')
     at = shift[0]
-    assert BONGO_STATE == 0x80001844
-    cave = [0x7180FCFC, 0x558C843E, 0x408200F4, 0x3D608000,
-            0x616B1844, 0x576A103A, 0x7D6B5214, 0x800B0000,
-            0x718A0F00, 0x540A07BE, 0x41820090, 0x2C0A0001,
-            0x41800010, 0x2C0A0003, 0x41820028, 0x48000028,
-            0x7D4C42E6, 0x7D405050, 0x554A653E, 0x280A001D,
-            0x39400001, 0x41810010, 0x39400002, 0x48000008,
-            0x39400001, 0x7C0C42E6, 0x5400003A, 0x7C005378,
-            0x900B0000, 0x2C0A0001, 0x40820068, 0x39600000,
-            0x718A0800, 0x41820008, 0x616B0008, 0x718A0200,
-            0x41820008, 0x616B0004, 0x718A0400, 0x41820008,
-            0x616B0002, 0x718A0100, 0x41820008, 0x616B0001,
-            0x7D8C5B78, 0x4800002C, 0x2C0A0003, 0x41820024,
-            0x5400003A, 0x7D4C42E6, 0x7D405050, 0x554A653E,
-            0x280A001D, 0x40810008, 0x60000003, 0x900B0000,
-            0x718CFCFF, 0x71800020, 0x41820008, 0x618C0100,
-            0x71801000, 0x41820008, 0x618C0200,
+    cave = [0x7180FCFC,        # andi.  r0,r12,0xFCFC  stick bytes (in_hi low half)
+            0x558C843E,        # srwi   r12,r12,16     (doesn't touch cr0)
+            0x40820014,        # bne    back           a real pad: unchanged
+            0x718CFCFF,        # andi.  r12,r12,0xFCFF drop A and B
+            0x71800020,        # andi.  r0,r12,0x0020  R (clap)
+            0x41820008,        # beq    back
+            0x618C0100,        # ori    r12,r12,0x0100 -> A
             0]                 # back:  b at+1
-    if len(cave) % 2:
-        cave.insert(-1, 0x60000000)    # branches to `back` land on this nop
+    assert cave[:-1] == [0x7180FCFC, 0x558C843E, 0x40820014, 0x718CFCFF, 0x71800020, 0x41820008, 0x618C0100]
     back = len(cave) - 1
     c = _insert_cave(w, cave)
     w[c + back] = branch((c + back) * 4, (at + 1) * 4)
@@ -552,8 +535,7 @@ def repair_bongos(bodies):
     # GameCube drum masks (right = Y 0x0800, left = X 0x0400): A/X (right
     # bongo) -> right, B/Y (left bongo) -> left. R (the clap mic) is
     # not a drum: hitting both drums already sets both bits, which jumps.
-    # codeA sends the clap as Wii Remote A, Start also as B, and a menu tap
-    # (a hit after a pause) as a D-pad direction.
+    # codeA sends the clap as Wii Remote A.
     w = list(bodies[0x80246588]); k = check_at(w, 'codeB')
     assert w[k + 1] >> 16 == 0x4182
     w[k + 1] = 0x60000000
