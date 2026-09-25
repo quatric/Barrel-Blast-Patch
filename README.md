@@ -15,8 +15,8 @@ Tested on a real Wii with a USB loader.
 **Works:**
 
 - GameCube pad: left/right drums, both-drums jump, steering, menus
-- DK Bongos: left/right drums, both drums to jump, clap to attack (rim hits
-  and claps no longer steer you right)
+- DK Bongos: left/right drums, both drums to jump, menus (rim hits and claps
+  no longer steer you right)
 - presses registering reliably, and unplugging/replugging a GameCube pad
   at the title screen or in menus
 - a GameCube pad driving a player that has no Wii Remote (players 1 and 2)
@@ -56,11 +56,11 @@ have no sticks).
 
 | Input | Action |
 | --- | --- |
-| Left drum | Left drum |
-| Right drum | Right drum |
+| Left drum | Left drum, and Wii Remote B (menu back) |
+| Right drum | Right drum, and Wii Remote A (attack / menu select) |
 | Both drums together | Jump / boost |
-| Clap | Wii Remote A (attack / menu select) |
 | Start | Pause |
+| Clap | Nothing |
 
 There's no steering on bongos alone, just like the original game, which pairs
 bongo hits with Wii Remote tilt.
