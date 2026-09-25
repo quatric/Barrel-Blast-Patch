@@ -28,7 +28,6 @@ Tested on a real Wii with a USB loader.
 
 - player 1's pointer may not respond until the HOME Menu has been opened once
 - player 2 occasionally misses a shake
-- on a Classic Controller, ZL also counts as a left-drum hit
 - a GameCube pad unplugged and replugged mid-race doesn't come back until
   you're back at a menu
 - relaunching the game without powering the console off can leave GameCube
@@ -70,9 +69,9 @@ bongo hits with Wii Remote tilt.
 
 | Input | Action |
 | --- | --- |
-| Y, R, ZR, or the R trigger | Right drum |
+| R, ZR, or the R trigger | Right drum |
 | X, L, ZL, or the L trigger | Left drum |
-| ZR (both drums) | Jump / boost |
+| ZR, or both drums together | Jump / boost |
 | Left stick | Steer / move |
 | Right stick | Pointer |
 | A / B, D-pad, + / −, HOME | Same as the Wii Remote |
@@ -109,8 +108,8 @@ handler loads into the same memory as the patch and black-screens the game.
 Either boot the patched image, or use the Gecko codes instead: copy
 `codes/RDKE01.ini` to Dolphin's `GameSettings` folder, enable the code under
 **Properties → Gecko Codes**, and set GameCube Port 1 to your controller or
-adapter before booting. The Gecko codes don't include the Classic Controller
-left drum, which only exists in patched images.
+adapter before booting. The Gecko codes don't include DK Bongos support or the
+Classic Controller left drum, which only exist in patched images.
 
 ## Building from source
 
