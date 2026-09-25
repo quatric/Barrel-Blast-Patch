@@ -8,7 +8,7 @@ The patch is applied to your own copy of the game: drop a clean `.wbfs` or
 `.iso` onto the patcher and play the result on a Wii (USB loader) or in
 Dolphin. Nothing from the game is included in this repository.
 
-## Status — v1.2
+## Status — v1.3
 
 Tested on a real Wii with a USB loader.
 
