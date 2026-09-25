@@ -53,11 +53,18 @@ Tested on a real Wii with a USB loader.
 ### DK Bongos
 
 The bongos plug into a GameCube port and are detected automatically (they
-have no sticks). Hit the left drum (B/Y) or right drum (A/X) for that side,
-both drums together to jump / boost, and press Start to pause. The right drum
-also acts as the Wii Remote's A button (attack, menu select); clapping does
-nothing. There's no steering on bongos alone, just like the
-original game, which pairs bongo hits with Wii Remote tilt.
+have no sticks).
+
+| Input | Action |
+| --- | --- |
+| Left drum | Left drum, and Wii Remote B |
+| Right drum | Right drum, and Wii Remote A (attack / menu select) |
+| Both drums together | Jump / boost |
+| Start | Pause |
+| Clap | Nothing |
+
+There's no steering on bongos alone, just like the original game, which pairs
+bongo hits with Wii Remote tilt.
 
 ### Classic Controller
 
