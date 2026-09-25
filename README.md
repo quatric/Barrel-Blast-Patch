@@ -8,14 +8,15 @@ The patch is applied to your own copy of the game: drop a clean `.wbfs` or
 `.iso` onto the patcher and play the result on a Wii (USB loader) or in
 Dolphin. Nothing from the game is included in this repository.
 
-## Status — v1.1
+## Status — v1.2
 
 Tested on a real Wii with a USB loader.
 
 **Works:**
 
 - GameCube pad: left/right drums, both-drums jump, steering, menus
-- DK Bongos (new in v1.1): left/right drums and clap-to-jump
+- DK Bongos: left/right drums and clap-to-jump (fixed in v1.2: rim hits and
+  claps no longer steer you right)
 - presses registering reliably, and unplugging/replugging a GameCube pad
   at the title screen or in menus
 - a GameCube pad driving a player that has no Wii Remote (players 1 and 2)
