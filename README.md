@@ -54,17 +54,19 @@ Tested on a real Wii with a USB loader.
 The bongos plug into a GameCube port and are detected automatically (they
 have no sticks).
 
-| Input | Action |
-| --- | --- |
-| Left drum | Left drum; Wii Remote B (menu back) after a pause |
-| Right drum | Right drum; Wii Remote A (menu select) after a pause |
-| Both drums together | Jump / boost |
-| Clap | Wii Remote A (attack / menu select) |
-| Start | Pause |
+| Input | Racing | Menus (a tap after a pause) |
+| --- | --- | --- |
+| Left drum, top | Left drum | D-pad Up |
+| Left drum, bottom | Left drum | D-pad Down |
+| Right drum, top | Right drum | D-pad Right |
+| Right drum, bottom | Right drum | D-pad Left |
+| Both drums together | Jump / boost | |
+| Clap | Attack (Wii Remote A) | Select (A) |
+| Start | Pause (Wii Remote +) | Back (B) |
 
-A drum only acts as A/B when you hit it after about half a second without
-drumming, as you do in a menu. While you're drumming in a race, an
-off-centre hit no longer punches; clap to attack.
+A drum hit counts as a menu tap when it comes after about half a second
+without drumming, so leave a short gap between menu moves. While you're
+drumming in a race, hits are only drums.
 
 There's no steering on bongos alone, just like the original game, which pairs
 bongo hits with Wii Remote tilt.
