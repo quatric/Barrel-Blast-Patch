@@ -488,6 +488,32 @@ def repair_bongos(bodies):
         assert w[k + 1] >> 16 == 0x4182, f'{name}: expected beq after the check'
         w[k + 1] = 0x60000000
         bodies[hook] = w
+    # codeA (buttons): on a bongo, the drums are only drums (codeB) -- drop
+    # their A/B, so the right drum no longer attacks nor the left one sends
+    # B -- and the clap (R, 0x0020 once shifted) becomes Wii Remote A
+    # (attack, menu select). Hooked on codeA's `srwi r12,r12,16`, while the
+    # stick bytes are still in r12's low half: only a pad with no sticks is
+    # a bongo, so a GameCube pad's buttons are unchanged.
+    w = list(bodies[0x80248090])
+    shift = [i for i, x in enumerate(w) if x == 0x558C843E]     # srwi r12,r12,16
+    if len(shift) != 1:
+        raise AssertionError(f'codeA: button shift found {len(shift)} times')
+    at = shift[0]
+    cave = [0x7180FCFC,        # andi.  r0,r12,0xFCFC  stick bytes (in_hi low half)
+            0x558C843E,        # srwi   r12,r12,16     (doesn't touch cr0)
+            0,                 # bne    back           a real pad: unchanged
+            0x55801DEE,        # rlwinm r0,r12,3,23,23 R (clap) 0x0020 -> A 0x0100
+            0x718C1CFF,        # andi.  r12,r12,0x1CFF drop A and B
+            0x7D8C0378,        # or     r12,r12,r0
+            0]                 # back:  b at+1
+    if len(cave) % 2:
+        cave.insert(-1, 0x60000000)
+    back = len(cave) - 1
+    cave[2] = 0x40820000 | (((back - 2) * 4) & 0xFFFC)
+    c = _insert_cave(w, cave)
+    w[c + back] = branch((c + back) * 4, (at + 1) * 4)
+    w[at] = branch(at * 4, c * 4)
+    bodies[0x80248090] = w
     # codeF (motion neutralising): any responding pad counts as present.
     w = list(bodies[0x80247FA8]); k = check_at(w, 'codeF')
     assert w[k + 1] >> 16 == 0x4082, 'codeF: expected bne after the check'
@@ -505,9 +531,9 @@ def repair_bongos(bodies):
         bodies[hook] = w
     # codeB (drums): drop the requirement, and remap bongo buttons onto the
     # GameCube drum masks (right = Y 0x0800, left = X 0x0400): A/X (right
-    # bongo) -> right, B/Y (left bongo) -> left. R (the clap mic) is
-    # ignored: hitting both drums already sets both bits, which jumps, and
-    # the right bongo's A already attacks through codeA.
+    # bongo) -> right, B/Y (left bongo) -> left. R (the clap mic) isn't a
+    # drum: hitting both drums already sets both bits, which jumps, and
+    # codeA sends the clap as Wii Remote A.
     w = list(bodies[0x80246588]); k = check_at(w, 'codeB')
     assert w[k + 1] >> 16 == 0x4182
     w[k + 1] = 0x60000000
