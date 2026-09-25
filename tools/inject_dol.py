@@ -464,8 +464,16 @@ def repair_bongos(bodies):
             raise AssertionError(f'{name}: use-origin check found {len(hits)} times')
         return hits[0]
 
-    # codeA (buttons), codeE (sample synthesis): drop the requirement.
-    for hook, name in ((0x80248090, 'codeA'), (0x80247BE0, 'codeE')):
+    # codeA (buttons): skip bongos entirely instead -- their drum surfaces
+    # are A/B/X/Y, so mapping them to Wii Remote A/B turned every right-bongo
+    # hit into an in-game action (a punch). The Wii Remote provides buttons.
+    w = list(bodies[0x80248090]); k = check_at(w, 'codeA')
+    assert w[k + 1] >> 16 == 0x4182, 'codeA: expected beq after the check'
+    rs = (w[k] >> 21) & 31
+    w[k] = 0x70000000 | (rs << 21) | 0xFCFC               # andi. r0,rS,0xFCFC
+    bodies[0x80248090] = w
+    # codeE (sample synthesis): drop the requirement.
+    for hook, name in ((0x80247BE0, 'codeE'),):
         w = list(bodies[hook]); k = check_at(w, name)
         assert w[k + 1] >> 16 == 0x4182, f'{name}: expected beq after the check'
         w[k + 1] = 0x60000000
@@ -499,6 +507,9 @@ def repair_bongos(bodies):
             0x54C6843E,        # srwi   r6,r6,16       (doesn't touch cr0)
             0,                 # bne    back           a real pad: unchanged
             0x38000000,        # li     r0,0
+            0x39800000,        # li     r12,0          ignore the analog word: the
+                               #                       clap mic's level lands there
+                               #                       and read as the R trigger
             0x70C90500,        # andi.  r9,r6,0x0500   A|X  (right bongo)
             0x41820008,
             0x60000800,        # ori    r0,r0,0x0800   -> right drum
