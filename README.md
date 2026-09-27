@@ -1,8 +1,10 @@
 # Barrel Blast Patch
 
-Play the Wii release of **Donkey Kong Barrel Blast** (`RDKE01`, USA) with a
-**GameCube controller**, a set of **DK Bongos**, or a **Classic Controller** —
-instead of shaking a Wii Remote and Nunchuk.
+Play the Wii release of **Donkey Kong Barrel Blast** with a **GameCube
+controller**, a set of **DK Bongos**, or a **Classic Controller** — instead
+of shaking a Wii Remote and Nunchuk. Works with the USA (`RDKE01`), European
+(`RDKP01`, *Donkey Kong: Jet Race*) and Japanese (`RDKJ01`, *Donkey Kong Taru
+Jet Race*) releases.
 
 The patch is applied to your own copy of the game: drop a clean `.wbfs` or
 `.iso` onto the patcher and play the result on a Wii (USB loader) or in
@@ -10,7 +12,9 @@ Dolphin. Nothing from the game is included in this repository.
 
 ## Status — v1.3
 
-Tested on a real Wii with a USB loader.
+Tested on a real Wii with a USB loader (USA). The European and Japanese
+builds run the same code, moved to those releases' addresses, and haven't been
+tested on a console yet.
 
 **Works:**
 
@@ -87,7 +91,8 @@ the remote). A GameCube pad can play without one.
 
 ### Patch your disc image
 
-You need a clean **USA** (`RDKE01`) `.wbfs` or `.iso` and
+You need a clean `.wbfs` or `.iso` of the **USA** (`RDKE01`), **European**
+(`RDKP01`) or **Japanese** (`RDKJ01`) release and
 [Wiimms ISO Tool](https://wit.wiimm.de/) (`wit`) on your `PATH`.
 
 ```bash
@@ -103,14 +108,15 @@ corrupted.
 ### Play on a Wii
 
 Copy the patched image to your USB loader's drive as usual
-(`wbfs/<Title> [RDKE01]/RDKE01.wbfs`). In the loader's settings for this game,
+(`wbfs/<Title> [RDKE01]/RDKE01.wbfs`, or `RDKP01` / `RDKJ01`). In the loader's settings for this game,
 turn the **debugger, hook type and cheats off**: the loader's cheat code
 handler loads into the same memory as the patch and black-screens the game.
 
 ### Play in Dolphin
 
 Either boot the patched image, or use the Gecko codes instead: copy
-`codes/RDKE01.ini` to Dolphin's `GameSettings` folder, enable the code under
+`codes/<disc ID>.ini` (`RDKE01`, `RDKP01` or `RDKJ01`) to Dolphin's
+`GameSettings` folder, enable the code under
 **Properties → Gecko Codes**, and set GameCube Port 1 to your controller or
 adapter before booting. The Gecko codes don't include DK Bongos support or the
 Classic Controller left drum, which only exist in patched images.

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Drag-and-drop GC/Bongos patcher: drop a disc image on the window, done.
 
-Extracts the disc, checks sys/main.dol against the exact USA retail hook
-instructions, adds an executable DOL section containing all six controller
+Extracts the disc, checks sys/main.dol against the exact retail hook
+instructions for its region (USA, Europe or Japan), adds an executable DOL section containing all six controller
 hooks, branches to them directly, and rebuilds via wit (Wiimms ISO Tool).
 
 The rebuilt image replaces the original *in place*, keeping its filename and
@@ -11,8 +11,8 @@ file next to it can leave the loader unable to find the title. The untouched
 original is kept alongside as `<name>.bak`.
 
 The injector uses the auto-poll implementation confirmed by the hardware
-investigation.  It accepts a clean RDKE01 retail DOL and deliberately refuses
-other revisions or an already-patched image.
+investigation.  It accepts a clean RDKE01, RDKP01 or RDKJ01 retail DOL and
+deliberately refuses other revisions or an already-patched image.
 """
 import os
 import queue
@@ -33,7 +33,6 @@ try:
 except ImportError:                                    # fall back to click-to-browse
     HAVE_DND = False
 
-EXPECTED_DISC_ID = 'RDKE01'
 
 
 def find_wit():
@@ -85,10 +84,11 @@ def run_patch(image_path, variant, log, done):
             disc_id = read_disc_id(fst)
             if not disc_id:
                 raise RuntimeError('could not read sys/boot.bin from the extracted disc')
-            if disc_id != EXPECTED_DISC_ID:
+            if disc_id not in inject_dol.REGIONS:
                 raise RuntimeError(
-                    'disc id %s is not the supported target (%s, USA)' % (disc_id, EXPECTED_DISC_ID))
-            log('disc: %s' % disc_id)
+                    'disc id %s is not a supported target (%s)' % (disc_id, ', '.join(
+                        '%s %s' % (r.disc_id, r.name) for r in inject_dol.REGIONS.values())))
+            log('disc: %s (%s)' % (disc_id, inject_dol.REGIONS[disc_id].name))
 
             dol_path = find_file(fst, 'main.dol')
             if not dol_path or os.path.basename(os.path.dirname(dol_path)) != 'sys':
@@ -98,7 +98,8 @@ def run_patch(image_path, variant, log, done):
                 raise RuntimeError(
                     'the clean-disc injector currently supports the auto-poll variant only')
             patched_dol = dol_path + '.patched'
-            section, hooks, size = inject_dol.inject(dol_path, patched_dol)
+            section, hooks, size, _ = inject_dol.inject(dol_path, patched_dol,
+                                                        disc_id=disc_id)
             os.replace(patched_dol, dol_path)
             log('  injected %d hooks into DOL text section %d (%d bytes)' %
                 (len(hooks), section, size))

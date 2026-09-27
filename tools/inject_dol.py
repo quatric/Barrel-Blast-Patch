@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Inject the DKBB controller hooks into a clean USA (RDKE01) main.dol.
+"""Inject the DKBB controller hooks into a clean retail main.dol: USA
+(RDKE01), Europe (RDKP01) or Japan (RDKJ01).
 
 Unlike the historical patcher, this does not require a Gecko codehandler or
 an already-baked code list.  It appends the hook bodies as a normal DOL text
 section and replaces each verified hook instruction with a direct branch.
+
+Every address below is the USA one; regions.py maps it onto the European
+and Japanese DOLs, which contain the same code at other addresses.
 """
 import os
 import re
@@ -13,6 +17,7 @@ import sys
 import tempfile
 
 from dol import Dol
+from regions import REGIONS, word
 
 # In a PyInstaller build the data files (codes/, src/, tools/prebuilt/) are
 # bundled under sys._MEIPASS at the same relative layout as the repository.
@@ -46,10 +51,13 @@ TEXT_LIMIT = 0x80003000
 # ones; codeE's "Nunchuk-class" marking of queued Wii Remote samples also has
 # to go, or the HOME Menu sees an extension being plugged in and pulled out
 # every read (a flickering pointer and the extension sound, seen on
-# hardware). CHomeButtonMenu is a singleton
-# allocated once at boot at a fixed heap address; its byte +0x32 is 1 while
-# the menu is open. The vtable word is checked first so a different heap
-# layout just means the gate never triggers.
+# hardware). CHomeButtonMenu is a singleton allocated once at boot; the
+# game keeps a pointer to it in small data. Its CHomeButtonMenu part starts
+# at +0x20 (the vtable word) and the byte at +0x52 is 1 while the menu is
+# open. On USA the object sits at 0x80531B60, which is where the gate used to
+# look directly; the heap differs by region, so the pointer is read instead.
+# The vtable word is checked first, so if the object isn't there the gate
+# just never triggers.
 HBM_GATED = (0x80248090, 0x80246588, 0x8024791C, 0x80247500, 0x80247BE0, 0x80247FA8)
 # Buttons and pointer keep running for a Classic Controller channel (r31 is
 # the KPAD base at both hook sites), so it can drive the HOME Menu.
@@ -59,9 +67,8 @@ HBM_CC_PASS = (0x80248090, 0x80247500)
 CC_WARMUP_HOOK = 0x80248090
 CC_WARMUP = TEXT_ADDRESS + 0x20      # 4 per-channel counters in the scratch
 CC_WARMUP_READS = 30                 # ~0.5 s at one read per frame
-HBM_OBJECT = 0x80531B80
+HBM_INSTANCE = 0x803E7AD8           # CHomeButtonMenu * (r13-0x5E48 on USA)
 HBM_VTABLE = 0x802E7288
-HBM_OPEN_FLAG = HBM_OBJECT + 0x32
 
 HOOK_ORDER = [
     0x80247ADC,  # SI poller
@@ -106,12 +113,13 @@ def branch(src, dst):
     return 0x48000000 | (off & 0x03FFFFFC)
 
 
-def hbm_gate(location, body_location, hook, preimage, cc_ok=False, cc_warmup=False):
+def hbm_gate(location, body_location, site, preimage, region, cc_ok=False, cc_warmup=False):
     """Stub: if the HOME Menu is open, run the original instruction and
     return to the game; otherwise fall through to the hook body. With
     cc_ok (hooks where r31 is the KPAD channel base), a channel whose
     extension is a Classic Controller keeps its hook even in the HOME Menu,
-    so a Classic Controller can drive the menu's pointer and buttons."""
+    so a Classic Controller can drive the menu's pointer and buttons.
+    `site` is the hook's address in this region's DOL."""
     hi = lambda v: ((v >> 16) + (1 if v & 0x8000 else 0)) & 0xFFFF
     lo = lambda v: v & 0xFFFF
     head = [
@@ -143,15 +151,17 @@ def hbm_gate(location, body_location, hook, preimage, cc_ok=False, cc_warmup=Fal
             0x998B0000,                               # stb   r12,0(r11)
             'warmdone:',
         ]
+    instance, vtable = region.addr(HBM_INSTANCE), region.addr(HBM_VTABLE)
     head += [
-        0x3D600000 | hi(HBM_OBJECT),                  # lis   r11,obj@ha
-        0x818B0000 | lo(HBM_OBJECT),                  # lwz   r12,obj@l(r11)
-        0x3D600000 | (HBM_VTABLE >> 16),              # lis   r11,vt@h
-        0x616B0000 | (HBM_VTABLE & 0xFFFF),           # ori   r11,r11,vt@l
-        0x7C0C5800,                                   # cmpw  r12,r11
+        0x3D600000 | hi(instance),                    # lis   r11,inst@ha
+        0x818B0000 | lo(instance),                    # lwz   r12,inst@l(r11)
+        0x2C0C0000,                                   # cmpwi r12,0
+        'beq run',
+        0x816C0020,                                   # lwz   r11,0x20(r12)
+        0x6D6B0000 | (vtable >> 16),                  # xoris r11,r11,vt@h
+        0x280B0000 | (vtable & 0xFFFF),               # cmplwi r11,vt@l
         'bne run',
-        0x3D600000 | hi(HBM_OPEN_FLAG),               # lis   r11,flag@ha
-        0x898B0000 | lo(HBM_OPEN_FLAG),               # lbz   r12,flag@l(r11)
+        0x898C0052,                                   # lbz   r12,0x52(r12)
         0x2C0C0000,                                   # cmpwi r12,0
         'beq run',
     ]
@@ -184,7 +194,7 @@ def hbm_gate(location, body_location, hook, preimage, cc_ok=False, cc_warmup=Fal
         if target == 'body':
             out[i] = branch(pc, body_location)
         elif target == 'back':
-            out[i] = branch(pc, hook + 4)
+            out[i] = branch(pc, site + 4)
         else:
             off = (labels[target] - i) * 4
             base = {'b': 0x48000000, 'beq': 0x41820000, 'bne': 0x40820000,
@@ -269,7 +279,7 @@ def _compile_c(src, name, entry_symbol):
         return _words(b), entry
 
 
-def cc_nunchuk_stub(at, target):
+def cc_nunchuk_stub(at, target, site):
     """Call cc_convert(count=r3, entry=r29 + old_count*0x84, chan=r26) with
     all volatile state preserved, then run the hooked instruction."""
     save = [0x9421FF90, 0x90010008, 0x7C0802A6, 0x90010074]      # stwu -0x70; stw r0; mflr; stw lr
@@ -289,13 +299,13 @@ def cc_nunchuk_stub(at, target):
     words = save + args + call + rest
     i = len(save) + len(args)
     words[i] = branch(at + i * 4, target) | 1
-    words[-1] = branch(at + (len(words) - 1) * 4, CC_NUNCHUK_HOOK + 4)
+    words[-1] = branch(at + (len(words) - 1) * 4, site + 4)
     return words
 
 
-def build_logger():
-    """Assemble the stub and compile src/gecko_log.c; returns
-    (stub_words, logger_words, gecko_log_offset)."""
+def build_logger(region):
+    """Assemble the stub and compile src/gecko_log.c for `region`; returns
+    (stub_words, logger_words, gecko_log_offset, bl_index, gecko_crash_offset)."""
     src = os.path.join(HERE, '..', 'src')
     with tempfile.TemporaryDirectory() as tmp:
         o, b = os.path.join(tmp, 's.o'), os.path.join(tmp, 's.bin')
@@ -306,6 +316,9 @@ def build_logger():
         subprocess.run([DEVKITPPC + 'powerpc-eabi-gcc', '-O2', '-mcpu=750', '-meabi',
                         '-msoft-float', '-mno-sdata', '-ffreestanding', '-fno-builtin',
                         '-fno-common', '-fno-asynchronous-unwind-tables', '-fno-exceptions',
+                        '-DKPAD_BASE=%#x' % region.addr(0x803C91C0),
+                        '-DSI_BUSY=%#x' % region.addr(0x80331538),
+                        '-DSI_TYPE=%#x' % region.addr(0x80331550),
                         '-c', os.path.join(src, 'gecko_log.c'), '-o', o],
                        check=True)
         relocs = subprocess.run([DEVKITPPC + 'powerpc-eabi-objdump', '-r', o],
@@ -600,69 +613,99 @@ def repair_pointer(coded):
     return words
 
 
-def inject(src, dst, log=False, log_only=False):
+# Absolute addresses each hook body builds with lis + ori/addi/load/store
+# that regions.py relocates: the poller's si:: globals and calls, and the
+# three KPAD channel-base compares in codeB, codeC and codeD. Asserted so a
+# body edit that adds a game address the relocator can't see fails loudly
+# instead of pointing a European or Japanese build at USA memory.
+RELOCATIONS = {0x80247ADC: 10, 0x80246588: 3, 0x8024791C: 3, 0x80247500: 3}
+
+
+def detect_region(d, disc_id=None, log_only=False):
+    """The region whose hook sites in `d` all hold the retail instructions.
+    With disc_id, only that region is tried."""
+    hooks = [LOG_HOOK] if log_only else HOOK_ORDER
+    candidates = [REGIONS[disc_id]] if disc_id else list(REGIONS.values())
+    problems = []
+    for region in candidates:
+        bad = [(h, word(d, region.addr(h))) for h in hooks
+               if word(d, region.addr(h)) != HOOK_PREIMAGE[h]]
+        if not bad:
+            return region
+        h, got = bad[0]
+        problems.append(f'{region}: 0x{region.addr(h):08X} holds '
+                        + ('nothing' if got is None else f'0x{got:08X}')
+                        + f', expected 0x{HOOK_PREIMAGE[h]:08X}')
+    raise AssertionError('not a clean retail ' + '/'.join(r.disc_id for r in candidates)
+                         + ' main.dol (other revision, or already patched): '
+                         + '; '.join(problems))
+
+
+def inject(src, dst, log=False, log_only=False, disc_id=None):
+    """Patch `src` into `dst`. The region is detected from the DOL itself;
+    pass disc_id to insist on one. Returns (section, {site: body}, size,
+    region)."""
     d = Dol(src)
+    region = detect_region(d, disc_id, log_only)
+    at = region.addr
     bodies = parse_gecko_ini()
     bodies[0x80246588] = repair_multiplayer(bodies[0x80246588])
     bodies[0x80247500] = repair_pointer(bodies[0x80247500])
     bodies[0x8024791C] = repair_stick(bodies[0x8024791C])
     repair_bongos(bodies)
-
-    order = [] if log_only else HOOK_ORDER
-    for hook in order or [LOG_HOOK]:
-        raw = d.read(hook, 4)
-        if raw is None:
-            raise AssertionError(f'hook address 0x{hook:08X} is not mapped (wrong DOL)')
-        got = struct.unpack('>I', raw)[0]
-        expected = HOOK_PREIMAGE[hook]
-        if got != expected:
-            raise AssertionError(
-                f'hook 0x{hook:08X}: expected 0x{expected:08X}, found 0x{got:08X} '
-                f'(wrong revision or already patched)')
+    for hook in HOOK_ORDER:
+        bodies[hook], n = region.relocate_words(bodies[hook])
+        if n != RELOCATIONS.get(hook, 0):
+            raise AssertionError(f'C2 {hook:#x}: relocated {n} addresses, expected '
+                                 f'{RELOCATIONS.get(hook, 0)}')
 
     if log_only:
-        return _inject_log_only(d, dst)
+        return _inject_log_only(d, dst, region)
 
     # Relax CNunchakaCheck's two extension-type comparisons from "==1" to
     # "!=0" (see NUNCHUK_CHECK_COMPARES). The branch instructions themselves
     # are left untouched -- only the immediate each compares against changes.
     for address, expected in NUNCHUK_CHECK_COMPARES.items():
-        got = struct.unpack('>I', d.read(address, 4))[0]
+        got = word(d, at(address))
         if got != expected:
             raise AssertionError(
-                f'Nunchuk check compare 0x{address:08X}: expected 0x{expected:08X}, '
+                f'Nunchuk check compare 0x{at(address):08X}: expected 0x{expected:08X}, '
                 f'found 0x{got:08X}')
-        d.write(address, struct.pack('>I', expected & 0xFFFF0000))
+        d.write(at(address), struct.pack('>I', expected & 0xFFFF0000))
 
     blob = bytearray(SCRATCH_BYTES)
     locations = {}
     for hook in HOOK_ORDER:
+        site = at(hook)
         while len(blob) & 0x3:            # word alignment is all code needs
             blob.extend(struct.pack('>I', 0x60000000))
         entry = TEXT_ADDRESS + len(blob)
         if log and hook == LOG_HOOK:
-            stub, logger, log_entry, bl_idx, crash_entry = build_logger()
+            stub, logger, log_entry, bl_idx, crash_entry = build_logger(region)
             log_patch = (len(blob) // 4 + bl_idx, log_entry)
             blob.extend(struct.pack('>%dI' % len(stub), *stub))
         if hook in HBM_GATED:
             cc_ok = hook in HBM_CC_PASS
             warm = hook == CC_WARMUP_HOOK
-            gate_len = len(hbm_gate(entry, entry, hook, HOOK_PREIMAGE[hook], cc_ok, warm)) * 4
+            gate_len = len(hbm_gate(entry, entry, site, HOOK_PREIMAGE[hook], region,
+                                    cc_ok, warm)) * 4
             body_location = entry + gate_len
-            gate = hbm_gate(entry, body_location, hook, HOOK_PREIMAGE[hook], cc_ok, warm)
+            gate = hbm_gate(entry, body_location, site, HOOK_PREIMAGE[hook], region,
+                            cc_ok, warm)
             blob.extend(struct.pack('>%dI' % len(gate), *gate))
         location = TEXT_ADDRESS + len(blob)
         words = list(bodies[hook])
         if words[-2] != HOOK_PREIMAGE[hook]:
             raise AssertionError(
                 f'C2 {hook:#x} does not end with its reproduced hook instruction')
-        words[-1] = branch(location + (len(words) - 1) * 4, hook + 4)
-        locations[hook] = entry
+        words[-1] = branch(location + (len(words) - 1) * 4, site + 4)
+        locations[site] = entry
         blob.extend(struct.pack('>%dI' % len(words), *words))
 
-    got = struct.unpack('>I', d.read(CC_NUNCHUK_HOOK, 4))[0]
+    cc_site = at(CC_NUNCHUK_HOOK)
+    got = word(d, cc_site)
     if got != CC_NUNCHUK_PREIMAGE:
-        raise AssertionError(f'CC->Nunchuk hook 0x{CC_NUNCHUK_HOOK:08X}: found 0x{got:08X}')
+        raise AssertionError(f'CC->Nunchuk hook 0x{cc_site:08X}: found 0x{got:08X}')
     cc_words, cc_entry = compile_c('cc_nunchuk.c', 'cc_convert')
     while len(blob) & 0x3:            # word alignment is all code needs
         blob.extend(struct.pack('>I', 0x60000000))
@@ -671,19 +714,20 @@ def inject(src, dst, log=False, log_only=False):
     while len(blob) & 0x3:            # word alignment is all code needs
         blob.extend(struct.pack('>I', 0x60000000))
     cc_stub = TEXT_ADDRESS + len(blob)
-    words = cc_nunchuk_stub(cc_stub, cc_code + cc_entry)
+    words = cc_nunchuk_stub(cc_stub, cc_code + cc_entry, cc_site)
     blob.extend(struct.pack('>%dI' % len(words), *words))
-    locations[CC_NUNCHUK_HOOK] = cc_stub
+    locations[cc_site] = cc_stub
 
     if log:
-        got = struct.unpack('>I', d.read(CRASH_HOOK, 4))[0]
+        crash_site = at(CRASH_HOOK)
+        got = word(d, crash_site)
         if got != CRASH_PREIMAGE:
-            raise AssertionError(f'crash hook 0x{CRASH_HOOK:08X}: found 0x{got:08X}')
+            raise AssertionError(f'crash hook 0x{crash_site:08X}: found 0x{got:08X}')
         while len(blob) & 0x3:            # word alignment is all code needs
             blob.extend(struct.pack('>I', 0x60000000))
         crash_at = TEXT_ADDRESS + len(blob)
         words = stub + [CRASH_PREIMAGE, 0]
-        words[-1] = branch(crash_at + (len(words) - 1) * 4, CRASH_HOOK + 4)
+        words[-1] = branch(crash_at + (len(words) - 1) * 4, crash_site + 4)
         crash_bl = len(blob) // 4 + bl_idx
         blob.extend(struct.pack('>%dI' % len(words), *words))
         while len(blob) & 0x3:            # word alignment is all code needs
@@ -695,26 +739,27 @@ def inject(src, dst, log=False, log_only=False):
             '>I', branch(TEXT_ADDRESS + idx * 4, logger_at + entry) | 1)
         blob[crash_bl * 4:crash_bl * 4 + 4] = struct.pack(
             '>I', branch(TEXT_ADDRESS + crash_bl * 4, logger_at + crash_entry) | 1)
-        locations[CRASH_HOOK] = crash_at
+        locations[crash_site] = crash_at
 
     if TEXT_ADDRESS + len(blob) > TEXT_LIMIT:
         raise AssertionError(
             f'injected section ends at 0x{TEXT_ADDRESS + len(blob):08X}, past '
             f'0x{TEXT_LIMIT:08X} (OS low-memory globals)')
     section = d.add_text_section(TEXT_ADDRESS, blob)
-    for hook, location in locations.items():
-        d.write(hook, struct.pack('>I', branch(hook, location)))
+    for site, location in locations.items():
+        d.write(site, struct.pack('>I', branch(site, location)))
     d.save(dst)
-    return section, locations, len(blob)
+    return section, locations, len(blob), region
 
 
-def _inject_log_only(d, dst):
+def _inject_log_only(d, dst, region):
     """Retail game plus the SI logger only: no controller hooks at all."""
-    stub, logger, entry, bl_idx, _ = build_logger()
+    site = region.addr(LOG_HOOK)
+    stub, logger, entry, bl_idx, _ = build_logger(region)
     blob = bytearray(SCRATCH_BYTES)
     stub_at = TEXT_ADDRESS + len(blob)
     words = stub + [HOOK_PREIMAGE[LOG_HOOK], 0]
-    words[-1] = branch(stub_at + (len(words) - 1) * 4, LOG_HOOK + 4)
+    words[-1] = branch(stub_at + (len(words) - 1) * 4, site + 4)
     blob.extend(struct.pack('>%dI' % len(words), *words))
     while len(blob) & 0x3:            # word alignment is all code needs
         blob.extend(struct.pack('>I', 0x60000000))
@@ -725,9 +770,9 @@ def _inject_log_only(d, dst):
         '>I', branch(TEXT_ADDRESS + idx * 4, logger_at + entry) | 1)
     assert TEXT_ADDRESS + len(blob) <= TEXT_LIMIT, 'log-only section too large'
     section = d.add_text_section(TEXT_ADDRESS, blob)
-    d.write(LOG_HOOK, struct.pack('>I', branch(LOG_HOOK, stub_at)))
+    d.write(site, struct.pack('>I', branch(site, stub_at)))
     d.save(dst)
-    return section, {LOG_HOOK: stub_at}, len(blob)
+    return section, {site: stub_at}, len(blob), region
 
 
 if __name__ == '__main__':
@@ -739,9 +784,12 @@ if __name__ == '__main__':
                     help='also print SI state over a USB Gecko in slot B (src/gecko_log.c)')
     ap.add_argument('--log-only', action='store_true',
                     help='retail game plus the SI logger only, no controller hooks')
+    ap.add_argument('--region', choices=sorted(REGIONS),
+                    help='refuse a DOL from any other region (default: detect)')
     args = ap.parse_args()
-    section, locations, size = inject(args.src, args.dst, args.log, args.log_only)
-    print(f'injected {len(locations)} hooks into text section {section} at '
+    section, locations, size, region = inject(args.src, args.dst, args.log, args.log_only,
+                                              args.region)
+    print(f'{region}: injected {len(locations)} hooks into text section {section} at '
           f'0x{TEXT_ADDRESS:08X} ({size} bytes)')
     for hook, body in locations.items():
         print(f'  0x{hook:08X} -> 0x{body:08X}')

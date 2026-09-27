@@ -25,6 +25,18 @@ typedef unsigned int u32;
 #define Q_SAMPLES   (*(volatile unsigned short *)0x8000183C)  /* scratch +0x1C */
 #define Q_READS     (*(volatile unsigned short *)0x8000183E)  /* scratch +0x1E */
 
+/* Game globals: USA addresses by default; tools/inject_dol.py passes the
+ * European / Japanese ones from tools/regions.py. */
+#ifndef KPAD_BASE
+#define KPAD_BASE   0x803C91C0          /* channel 0 KPAD struct */
+#endif
+#ifndef SI_BUSY
+#define SI_BUSY     0x80331538          /* si:: busy flag, -1 idle */
+#endif
+#ifndef SI_TYPE
+#define SI_TYPE     0x80331550          /* si:: cached type, 4 channels */
+#endif
+
 static __attribute__((noinline)) u32 exchange(u32 v)
 {
     EXI1_CSR = 0xD0;                    /* device 0, 32 MHz */
@@ -67,7 +79,7 @@ void gecko_log(u32 chan)                /* r3 = KPADRead's channel */
     /* How many samples a real Wii Remote queues per read, averaged by
      * the reader: channel 0's queued count (+0x10F) at KPADRead entry. */
     if (chan == 0) {
-        Q_SAMPLES += *(volatile unsigned char *)(0x803C91C0 + 0x10F);
+        Q_SAMPLES += *(volatile unsigned char *)(KPAD_BASE + 0x10F);
         Q_READS += 1;
     }
 
@@ -79,10 +91,10 @@ void gecko_log(u32 chan)                /* r3 = KPADRead's channel */
     if (exchange(0x90000000) != 0x04700000)   /* USB Gecko ID check */
         return;
 
-    field('B', REG(0x80331538));        /* si:: busy flag, -1 idle */
+    field('B', REG(SI_BUSY));           /* si:: busy flag, -1 idle */
     put('t');
     for (i = 0; i < 4; i++) {
-        hex(REG(0x80331550 + i * 4));   /* si:: cached type */
+        hex(REG(SI_TYPE + i * 4));      /* si:: cached type */
         put(i < 3 ? ',' : ' ');
     }
     field('S', REG(0xCD006438));
@@ -92,7 +104,7 @@ void gecko_log(u32 chan)                /* r3 = KPADRead's channel */
     put(' ');
     put('K');
     for (i = 0; i < 2; i++) {
-        u32 k = 0x803C91C0 + i * 0x524;
+        u32 k = KPAD_BASE + i * 0x524;
         hex(REG(k));
         put(',');
         hex(REG(k + 0x5C));

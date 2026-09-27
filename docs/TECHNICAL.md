@@ -19,7 +19,8 @@ directly (see the caveat above); only the poller is generated.
 
 ## How it works
 
-Everything below refers to the USA `main.dol`.
+Everything below refers to the USA `main.dol`; see
+[Other regions](#other-regions) for Europe and Japan.
 
 ### KPAD injection points
 
@@ -200,6 +201,50 @@ All three hooks allocate proper stack frames and save/restore the volatile
 registers (`r0`, `r3`–`r12`, `f0`–`f6`) the game's own compiled code is using for
 locals. Skipping that corrupts the caller's frame and crashes.
 
+## Other regions
+
+The European (`RDKP01`, *Donkey Kong: Jet Race*) and Japanese (`RDKJ01`,
+*Donkey Kong Taru Jet Race*) `main.dol`s contain the same game code and SDK as
+the USA one, at other addresses. Around every hook site and every function or
+global the hooks use, the code is identical to the USA code (checked ±96
+instructions each) once branch offsets and the halves of absolute addresses
+are masked out. So the patch is written once, against USA addresses, and
+[`tools/regions.py`](../tools/regions.py) moves it:
+
+| | USA | Europe | Japan |
+| --- | --- | --- | --- |
+| KPADRead entry (poller) | `0x80247ADC` | `0x802487BC` | `0x8024754C` |
+| Button compose (codeA) | `0x80248090` | `0x80248D70` | `0x80247B00` |
+| Accelerometer (codeB) | `0x80246588` | `0x80247268` | `0x80245FF8` |
+| Nunchuk stick (codeC) | `0x8024791C` | `0x802485FC` | `0x8024738C` |
+| IR epilogue (codeD) | `0x80247500` | `0x802481E0` | `0x80246F70` |
+| Sample count (codeE) | `0x80247BE0` | `0x802488C0` | `0x80247650` |
+| Motion (codeF) | `0x80247FA8` | `0x80248C88` | `0x80247A18` |
+| After the game's KPADRead | `0x8003A788` | `0x8003A810` | `0x8003A6B8` |
+| CNunchakaCheck compares | `0x8017998C`, `0x80179F90` | `0x8017A160`, `0x8017A764` | `0x801791BC`, `0x801797C0` |
+| KPAD channel 0 | `0x803C91C0` | `0x803CBF40` | `0x803D3540` |
+| si:: busy / shadow / types | `0x80331538` | `0x803342D8` | `0x80333218` |
+| `CHomeButtonMenu *` | `0x803E7AD8` | `0x803EA858` | `0x803F1E80` |
+
+(The full list, including `SIGetType`, `OSDisableInterrupts`/`OSRestoreInterrupts`
+and `__OSUnhandledException`, is in `regions.py`.) Each entry was found by
+matching the USA code around it against the other DOL with relocatable bits
+masked, and required to match exactly once; data addresses were read back
+from the matched code that references them.
+
+The hook bodies build their game addresses with `lis` plus `ori`/`addi`/a
+load or store; `Region.relocate_words` rewrites those pairs, and
+`inject_dol.py` asserts how many it found in each body (10 in the poller, 3
+channel compares each in codeB, codeC and codeD), so a body edit that adds an
+address the relocator can't see fails instead of pointing a European or
+Japanese build at USA memory. The injected section stays at `0x80001820` in
+every region (all three DOLs start at `0x80004000`). `inject_dol.py` picks the
+region from the DOL itself, by which region's hook sites all hold the retail
+instructions; the GUI additionally requires it to match the disc ID.
+
+`codes/RDKP01.ini` and `codes/RDKJ01.ini` are generated from `codes/RDKE01.ini`
+by `tools/region_codes.py`; rerun it after editing the USA codes.
+
 ## Investigation log
 
 - **A GameCube controller stops registering after unplugging/replugging, and
@@ -366,7 +411,10 @@ locals. Skipping that corrupts the caller's frame and crashes.
     for players 1 and 2), synthesising three samples per read.
   - All hooks but the poller stand down while the HOME Menu is open
     (`CHomeButtonMenu` at `0x80531B80`, open flag `+0x32`), except buttons
-    and pointer on a Classic Controller channel.
+    and pointer on a Classic Controller channel. (Later: that address is the
+    object's CHomeButtonMenu part at `+0x20` of the heap allocation at
+    `0x80531B60`; the gate now reads the game's own pointer to it,
+    `0x803E7AD8`, since the heap layout differs between regions.)
   **Still open:** Classic Controller left drum (read_kpad_acc only runs the
   Nunchuk block for sample types 4/5; letting type 2 in broke it
   completely, so that was reverted); relaunching from the Wii Menu without
@@ -560,7 +608,8 @@ Older findings, in rough priority order:
   `ori` to form `0x803C96E4`, and channel 3 has an explicit stub into the shared
   Classic/GameCube controller check. The poller already enables all four SI
   channels. Multiplayer still needs console testing.
-- USA (`RDKE01`) only.
+- Europe (`RDKP01`) and Japan (`RDKJ01`) are supported by relocation (see
+  [Other regions](#other-regions)) but haven't been tested on a console.
 - The `autopoll` poller's hook installs correctly and runs without crashing in
   Dolphin (checked with a GDB-stub debugger against the compiled code, not
   just read from source), but it has **not** been confirmed to actually fire
