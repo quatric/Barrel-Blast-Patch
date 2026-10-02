@@ -126,6 +126,12 @@ def run_patch(image_path, variant, log, done):
         done(False, str(e))
 
 
+def asset(name):
+    if getattr(sys, 'frozen', False):
+        return os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(sys.executable)), 'assets', name)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'assets', name)
+
+
 BASE = TkinterDnD.Tk if HAVE_DND else tk.Tk
 
 
@@ -133,11 +139,17 @@ class App(BASE):
     def __init__(self):
         super().__init__()
         self.title('DKBB GC/Bongos Patcher')
-        self.geometry('560x460')
+        self.geometry('560x540')
         self.msgq = queue.Queue()
         self.busy = False
 
         self.variant = tk.StringVar(value='autopoll')
+        try:
+            img = tk.PhotoImage(file=asset('logo.png'))
+            self.logo = img.subsample(max(1, img.width() // 300))
+            tk.Label(self, image=self.logo).pack(pady=(10, 0))
+        except Exception:                              # the window is fine without its logo
+            pass
         tk.Label(self, text='Clean-disc injector · auto-poll SI').pack(
             fill='x', padx=10, pady=(10, 0))
 

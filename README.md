@@ -1,5 +1,7 @@
 # Barrel Blast Patch
 
+![Donkey Kong Barrel Blast](assets/logo.png)
+
 Play the Wii release of **Donkey Kong Barrel Blast** with a **GameCube
 controller**, a set of **DK Bongos**, or a **Classic Controller** — instead
 of shaking a Wii Remote and Nunchuk. Works with the USA (`RDKE01`), European

@@ -85,7 +85,7 @@ jobs:
             --collect-all tkinterdnd2 \
             --icon assets/icon.icns --target-architecture universal2 \
             --add-data codes/RDKE01.ini:codes --add-data src/cc_nunchuk.c:src \
-            --add-data tools/prebuilt:tools/prebuilt \
+            --add-data tools/prebuilt:tools/prebuilt --add-data assets/logo.png:assets \
             $BINS --distpath pyinst_dist tools/gui.py
           cp wit-gpl-2.0.txt "pyinst_dist/Barrel-Blast-Patcher.app/Contents/Resources/wit-gpl-2.0.txt"
           cd pyinst_dist
@@ -99,7 +99,7 @@ jobs:
           pyinstaller --name Barrel-Blast-Patcher --windowed --noconfirm \
             --collect-all tkinterdnd2 \
             --add-data codes/RDKE01.ini:codes --add-data src/cc_nunchuk.c:src \
-            --add-data tools/prebuilt:tools/prebuilt \
+            --add-data tools/prebuilt:tools/prebuilt --add-data assets/logo.png:assets \
             $BINS --distpath pyinst_dist tools/gui.py
           cp wit-gpl-2.0.txt pyinst_dist/Barrel-Blast-Patcher/
           cd pyinst_dist
@@ -115,7 +115,7 @@ jobs:
             --collect-all tkinterdnd2 \
             --icon assets/icon.ico \
             --add-data "codes/RDKE01.ini;codes" --add-data "src/cc_nunchuk.c;src" \
-            --add-data "tools/prebuilt;tools/prebuilt" \
+            --add-data "tools/prebuilt;tools/prebuilt" --add-data "assets/logo.png;assets" \
             $BINS --distpath pyinst_dist tools/gui.py
           cp wit-gpl-2.0.txt pyinst_dist/Barrel-Blast-Patcher/
           cd pyinst_dist
