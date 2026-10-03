@@ -625,7 +625,7 @@ def detect_region(d, disc_id=None, log_only=False):
     """The region whose hook sites in `d` all hold the retail instructions.
     With disc_id, only that region is tried."""
     hooks = [LOG_HOOK] if log_only else HOOK_ORDER
-    candidates = [REGIONS[disc_id]] if disc_id else list(REGIONS.values())
+    candidates = [r for r in REGIONS.values() if not disc_id or r.disc_id[:4] == disc_id[:4]]
     problems = []
     for region in candidates:
         bad = [(h, word(d, region.addr(h))) for h in hooks

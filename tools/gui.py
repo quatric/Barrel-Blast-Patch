@@ -25,6 +25,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from disc_ids import match_disc_id
 import inject_dol
 
 try:
@@ -84,11 +85,12 @@ def run_patch(image_path, variant, log, done):
             disc_id = read_disc_id(fst)
             if not disc_id:
                 raise RuntimeError('could not read sys/boot.bin from the extracted disc')
-            if disc_id not in inject_dol.REGIONS:
+            region = match_disc_id(disc_id, inject_dol.REGIONS)
+            if region is None:
                 raise RuntimeError(
                     'disc id %s is not a supported target (%s)' % (disc_id, ', '.join(
                         '%s %s' % (r.disc_id, r.name) for r in inject_dol.REGIONS.values())))
-            log('disc: %s (%s)' % (disc_id, inject_dol.REGIONS[disc_id].name))
+            log('disc: %s (%s)' % (disc_id, inject_dol.REGIONS[region].name))
 
             dol_path = find_file(fst, 'main.dol')
             if not dol_path or os.path.basename(os.path.dirname(dol_path)) != 'sys':
@@ -99,7 +101,7 @@ def run_patch(image_path, variant, log, done):
                     'the clean-disc injector currently supports the auto-poll variant only')
             patched_dol = dol_path + '.patched'
             section, hooks, size, _ = inject_dol.inject(dol_path, patched_dol,
-                                                        disc_id=disc_id)
+                                                        disc_id=region)
             os.replace(patched_dol, dol_path)
             log('  injected %d hooks into DOL text section %d (%d bytes)' %
                 (len(hooks), section, size))
